@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "neutron_event_analyzer"
+version = "0.1.0"
+description = "A package for analyzing neutron event camera data"
+readme = "README.md"
+authors = [{ name = "Tsviki Y. Hirsh", email = "tsviki.hirsh@gmail.com" }]
+license = { text = "MIT" }
+requires-python = ">=3.8"
+dependencies = [
+    "pandas>=1.5.0",
+    "numpy>=1.21.0",
+    "tqdm>=4.62.0",
+    "matplotlib>=3.5.0",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/TsvikiHirsh/neutron_event_analyzer"
+"Repository" = "https://github.com/TsvikiHirsh/neutron_event_analyzer"
