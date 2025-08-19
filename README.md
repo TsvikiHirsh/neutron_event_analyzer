@@ -3,7 +3,12 @@
 A Python package for analyzing event-by-event data from neutron event camera measurements. This package processes .empirphot and .empirevent files, associates photons with events, computes ellipticity, and provides plotting utilities.
 
 ## Installation
-Install the package using pip:
+Clone the repo using git:
+```bash
+git clone https://github.com/TsvikiHirsh/neutron_event_analyzer.git
+```
+
+Then Install the package using pip:
 ```python
 pip install .
 ```
