@@ -8,8 +8,16 @@ import tempfile
 import uuid
 import matplotlib.pyplot as plt
 
+# Check for lumacamTesting availability
+try:
+    import lumacamTesting as lct
+    import yaspin
+    LUMACAM_AVAILABLE = True
+except ImportError:
+    LUMACAM_AVAILABLE = False
+
 class Analyse:
-    def __init__(self, data_folder, export_dir="./export", n_threads=10):
+    def __init__(self, data_folder, export_dir="./export", n_threads=10, use_lumacam=False):
         """
         Initialize the Analyse object.
 
@@ -17,10 +25,15 @@ class Analyse:
             data_folder (str): Path to the data folder containing 'photonFiles' and 'eventFiles'.
             export_dir (str): Path to the directory containing export binaries (empir_export_events, empir_export_photons).
             n_threads (int): Number of threads for parallel processing.
+            use_lumacam (bool): If True, use lumacamTesting for association (if available).
         """
         self.data_folder = data_folder
         self.export_dir = export_dir
         self.n_threads = n_threads
+        self.use_lumacam = use_lumacam and LUMACAM_AVAILABLE
+        if use_lumacam and not LUMACAM_AVAILABLE:
+            print("Warning: lumacamTesting not installed. Falling back to simple association.")
+            self.use_lumacam = False
         self.events_df = None
         self.photons_df = None
         self.associated_df = None
@@ -110,21 +123,106 @@ class Analyse:
             return pd.concat(dfs).replace(" nan", float("nan"))
         return pd.DataFrame()
 
-    def associate(self, time_norm_ns=1.0, spatial_norm_px=1.0, dSpace_px=np.inf, verbosity=1):
+    def associate(self, time_norm_ns=1.0, spatial_norm_px=1.0, dSpace_px=np.inf, weight_px_in_s=None, max_dist_s=None, verbosity=1):
         """
         Associate photons to events and store the result.
 
         Args:
-            time_norm_ns (float): Time normalization factor (ns).
-            spatial_norm_px (float): Spatial normalization factor (px).
-            dSpace_px (float): Max allowed center-of-mass distance for multiphoton matches.
+            time_norm_ns (float): Time normalization factor (ns) for simple association.
+            spatial_norm_px (float): Spatial normalization factor (px) for simple association.
+            dSpace_px (float): Max allowed center-of-mass distance for multiphoton matches (simple association).
+            weight_px_in_s (float, optional): Weight for pixel-to-second conversion (lumacam association).
+            max_dist_s (float, optional): Max distance in seconds (lumacam association).
             verbosity (int): 0=silent, 1=summary, 2=debug.
         """
         if self.photons_df is None or self.events_df is None:
             raise ValueError("Load photons and events first.")
-        self.associated_df = self._associate_photons_to_events_simple(
-            self.photons_df, self.events_df, time_norm_ns, spatial_norm_px, dSpace_px, verbosity
-        )
+        if self.use_lumacam:
+            self.associated_df = self._associate_photons_to_events(
+                self.photons_df, self.events_df, weight_px_in_s, max_dist_s, verbosity
+            )
+        else:
+            self.associated_df = self._associate_photons_to_events_simple(
+                self.photons_df, self.events_df, time_norm_ns, spatial_norm_px, dSpace_px, verbosity
+            )
+
+    def _associate_photons_to_events(self, photons_df, events_df, weight_px_in_s, max_dist_s, verbosity):
+        """
+        Associates photons to events using lumacamTesting's shortest temporal+spatial connection.
+        """
+        if not LUMACAM_AVAILABLE:
+            raise ImportError("lumacamTesting is required for this method.")
+        
+        photons = photons_df.rename(columns={"x": "x_px", "y": "y_px", "t": "t_s"}).copy()
+        events = events_df.rename(columns={"x": "x_px", "y": "y_px", "t": "t_s"}).copy()
+
+        def fix_time_with_progress(df, label="DataFrame"):
+            df = df.sort_values("t_s").reset_index(drop=True)
+            t_s = df["t_s"].to_numpy()
+            for i in tqdm(range(1, len(t_s)), desc=f"⏱ Fixing times: {label}", leave=False):
+                if t_s[i] <= t_s[i - 1]:
+                    t_s[i] = t_s[i - 1] + 1e-12
+            df["t_s"] = t_s
+            return df
+
+        photons = fix_time_with_progress(photons, label="Photons")
+        events = fix_time_with_progress(events, label="Events")
+
+        if weight_px_in_s is None or max_dist_s is None:
+            all_x = pd.concat([photons['x_px'], events['x_px']])
+            all_y = pd.concat([photons['y_px'], events['y_px']])
+            all_t = pd.concat([photons['t_s'], events['t_s']])
+            spatial_scale = np.sqrt(np.var(all_x) + np.var(all_y))
+            temporal_scale = np.std(all_t)
+            weight_px_in_s = temporal_scale / spatial_scale
+            max_dist_s = 3 * temporal_scale
+            if verbosity >= 2:
+                print(f"📏 Spatial scale: {spatial_scale:.2f}")
+                print(f"⏱  Temporal scale: {temporal_scale:.2e} s")
+                print(f"⚖️  Weight px→s: {weight_px_in_s:.2e}")
+                print(f"📐 Max dist: {max_dist_s:.2e} s")
+        else:
+            if verbosity >= 2:
+                print(f"⚖️  Using provided weight_px_in_s: {weight_px_in_s}")
+                print(f"📐 Using provided max_dist_s: {max_dist_s}")
+
+        with yaspin.yaspin(text="Associating photons to events...", color="cyan") as spinner:
+            assoc = lct.EventAssociation.make_individualShortestConnection(
+                weight_px_in_s, max_dist_s,
+                photons[['t_s', 'x_px', 'y_px']],
+                events[['t_s', 'x_px', 'y_px']]
+            )
+            spinner.ok("✅")
+
+        cluster_associations = assoc.clusterAssociation_groundTruth
+        cluster_event_indices = assoc.clusterAssociation_toTest
+        result_df = photons_df.copy()
+        result_df["assoc_cluster_id"] = cluster_associations
+        result_df["assoc_t"] = np.nan
+        result_df["assoc_x"] = np.nan
+        result_df["assoc_y"] = np.nan
+        result_df["assoc_n"] = np.nan
+        result_df["assoc_PSD"] = np.nan
+
+        iterator = tqdm(assoc.clusters.index, desc="🔗 Associating events", disable=(verbosity < 1))
+        for cluster_id in iterator:
+            photon_indices = np.where(cluster_associations == cluster_id)[0]
+            event_indices = np.where(cluster_event_indices == cluster_id)[0]
+            if len(event_indices) > 0:
+                event_idx = event_indices[0]
+                event = events.iloc[event_idx]
+                result_df.loc[photon_indices, "assoc_t"] = event["t_s"]
+                result_df.loc[photon_indices, "assoc_x"] = event["x_px"]
+                result_df.loc[photon_indices, "assoc_y"] = event["y_px"]
+                result_df.loc[photon_indices, "assoc_n"] = event.get("n", np.nan)
+                result_df.loc[photon_indices, "assoc_PSD"] = event.get("PSD", np.nan)
+
+        if verbosity >= 1:
+            total = len(result_df)
+            associated = result_df['assoc_cluster_id'].notna().sum()
+            print(f"✅ Associated {associated} / {total} photons ({100 * associated / total:.1f}%)")
+
+        return result_df
 
     def _associate_photons_to_events_simple(
         self, photons_df, events_df, time_norm_ns, spatial_norm_px, dSpace_px, verbosity
@@ -193,7 +291,7 @@ class Analyse:
 
         Args:
             x_col, y_col (str): Column names for spatial coordinates.
-            event_col (str): Column name for event ID.
+            event_col (str): Column name for event ID (or 'assoc_cluster_id' for lumacam).
             verbosity (int): 0 = silent, 1 = print summary.
         """
         if self.associated_df is None:
@@ -246,25 +344,4 @@ class Analyse:
             if self.events_df is None:
                 raise ValueError("Load events first.")
             df = self.events_df
-        fig, ax = plt.subplots(2, 2, figsize=(8, 6), sharex=False, sharey=False)
-        df.query("0<tof<1e-6").plot.hexbin(x="tof", y="PSD", bins="log", yscale="log", ax=ax[0][0], cmap="turbo", gridsize=100)
-        df.query("0<tof<1e-6").plot.hexbin(x="n", y="PSD", bins="log", yscale="log", ax=ax[0][1], cmap="turbo")
-        df.query("0<tof<1e-6").plot.hexbin(x="tof", y="n", bins="log", ax=ax[1][0], cmap="turbo")
-        df.query("0<tof<1e-6 and @min_n<n<@max_n and @min_psd<PSD<@max_psd").tof.plot.hist(
-            bins=np.arange(0, 1e-6, 1.5625e-9), histtype="step", ax=ax[1][1],
-            label=f"n:({min_n},{max_n}) PSD:({min_psd},{max_psd})", legend=True
-        )
-        fig.suptitle(name, y=0.94)
-        plt.subplots_adjust(hspace=0.32, wspace=0.32)
-        plt.show()
-
-    def get_combined_dataframe(self):
-        """
-        Get the combined DataFrame with associated photon and event information.
-
-        Returns:
-            pd.DataFrame: The associated DataFrame.
-        """
-        if self.associated_df is None:
-            raise ValueError("Associate photons and events first.")
-        return self.associated_df
+        fig, ax = plt.subplots(2,

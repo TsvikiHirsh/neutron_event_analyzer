@@ -17,6 +17,9 @@ dependencies = [
     "matplotlib>=3.5.0",
 ]
 
+[project.optional-dependencies]
+lumacam = ["lumacamTesting", "yaspin>=2.0.0"]
+
 [project.urls]
 "Homepage" = "https://github.com/TsvikiHirsh/neutron_event_analyzer"
 "Repository" = "https://github.com/TsvikiHirsh/neutron_event_analyzer"
