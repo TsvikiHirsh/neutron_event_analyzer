@@ -13,23 +13,28 @@ Then Install the package using pip:
 pip install .
 ```
 
-Ensure the export directory containing the binaries `empir_export_events` and `empir_export_photons` is accessible, or specify its path during initialization.
+Ensure the `export` directory containing the binaries `empir_export_events` and `empir_export_photons` is accessible, or specify its path during initialization.
 
 ## Requirements
 
-Python >= 3.8
-pandas >= 1.5.0
-numpy >= 1.21.0
-tqdm >= 4.62.0
-matplotlib >= 3.5.0
+- Python >= 3.8
+- pandas >= 1.5.0
+- numpy >= 1.21.0
+- tqdm >= 4.62.0
+- matplotlib >= 3.5.0
 
 ## Directory Structure
+
 The package expects a data folder with the following structure:
+
+```
 data_folder/
 ├── photonFiles/
 │   └── *.empirphot
 └── eventFiles/
     └── *.empirevent
+```
+
 
 ## Usage
 ```python
