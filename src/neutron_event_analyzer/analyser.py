@@ -1,3 +1,5 @@
+# src/neutron_event_analyzer/analyser.py
+
 import os
 import glob
 import pandas as pd
@@ -24,7 +26,7 @@ class Analyse:
         Args:
             data_folder (str): Path to the data folder containing 'photonFiles' and 'eventFiles'.
             export_dir (str): Path to the directory containing export binaries (empir_export_events, empir_export_photons).
-            n_threads (int): Number of threads for parallel processing.
+            n_threads (int): Number of threads for parallel processing (default: 10).
             use_lumacam (bool): If True, use lumacamTesting for association (if available).
         """
         self.data_folder = data_folder
@@ -34,33 +36,58 @@ class Analyse:
         if use_lumacam and not LUMACAM_AVAILABLE:
             print("Warning: lumacamTesting not installed. Falling back to simple association.")
             self.use_lumacam = False
+        self.pair_files = None
+        self.pair_dfs = None
         self.events_df = None
         self.photons_df = None
         self.associated_df = None
 
-    def load_events(self, glob_string=None):
+    def load(self, event_glob="eventFiles/*.empirevent", photon_glob="photonFiles/*.empirphot"):
         """
-        Load and convert event files into a DataFrame.
+        Load paired event and photon files independently without concatenating into single DataFrames initially.
 
         Args:
-            glob_string (str, optional): Glob pattern for event files. Defaults to all .empirevent in eventFiles.
+            event_glob (str, optional): Glob pattern relative to data_folder for event files.
+            photon_glob (str, optional): Glob pattern relative to data_folder for photon files.
         """
-        if glob_string is None:
-            glob_string = os.path.join(self.data_folder, "eventFiles", "*.empirevent")
-        self.events_df = self._convert_events(glob_string)
-        print(f"Loaded {len(self.events_df)} events.")
+        event_files = glob.glob(os.path.join(self.data_folder, event_glob))
+        photon_files = glob.glob(os.path.join(self.data_folder, photon_glob))
 
-    def load_photons(self, glob_string=None):
-        """
-        Load and convert photon files into a DataFrame.
+        def get_key(f):
+            return os.path.basename(f).rsplit('.', 1)[0]
 
-        Args:
-            glob_string (str, optional): Glob pattern for photon files. Defaults to all .empirphot in photonFiles.
-        """
-        if glob_string is None:
-            glob_string = os.path.join(self.data_folder, "photonFiles", "*.empirphot")
-        self.photons_df = self._convert_photons(glob_string)
-        print(f"Loaded {len(self.photons_df)} photons.")
+        event_dict = {get_key(f): f for f in event_files}
+        photon_dict = {get_key(f): f for f in photon_files}
+
+        common_keys = sorted(set(event_dict) & set(photon_dict))
+        self.pair_files = [(event_dict[k], photon_dict[k]) for k in common_keys]
+        print(f"Found {len(self.pair_files)} paired files.")
+
+        def process_pair(pair, tmp_dir):
+            event_file, photon_file = pair
+            event_df = self._convert_event_file(event_file, tmp_dir)
+            photon_df = self._convert_photon_file(photon_file, tmp_dir)
+            if event_df is not None and photon_df is not None:
+                return event_df, photon_df
+            return None
+
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp_dir:
+            with ThreadPoolExecutor(max_workers=self.n_threads) as executor:
+                futures = [executor.submit(process_pair, pair, tmp_dir) for pair in self.pair_files]
+                self.pair_dfs = []
+                for future in tqdm(as_completed(futures), total=len(futures), desc="Loading pairs"):
+                    result = future.result()
+                    if result is not None:
+                        self.pair_dfs.append(result)
+
+        # Optionally concatenate for full DataFrames
+        if self.pair_dfs:
+            self.events_df = pd.concat([edf for edf, pdf in self.pair_dfs]).replace(" nan", float("nan"))
+            self.photons_df = pd.concat([pdf for edf, pdf in self.pair_dfs]).replace(" nan", float("nan"))
+            print(f"Loaded {len(self.events_df)} events and {len(self.photons_df)} photons in total.")
+        else:
+            self.events_df = pd.DataFrame()
+            self.photons_df = pd.DataFrame()
 
     def _convert_event_file(self, eventfile, tmp_dir):
         out_file = os.path.join(tmp_dir, f"{uuid.uuid4().hex}.csv")
@@ -71,27 +98,10 @@ class Analyse:
             df.columns = ["x", "y", "t", "n", "PSD", "tof"]
             df["tof"] = df["tof"].astype(float)
             df["PSD"] = df["PSD"].astype(float)
-            # Uncomment and adjust if needed:
-            # y = df.tof.where((df.tof > 0) & (df.tof < 1800e-9))
-            # df["tof"] = (y - 820e-9) % (1144 * 1.5625e-9)
             return df
         except Exception as e:
             print(f"Error processing {out_file}: {e}")
             return None
-
-    def _convert_events(self, glob_string):
-        eventfiles = glob.glob(glob_string)
-        dfs = []
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmp_dir:
-            with ThreadPoolExecutor(max_workers=self.n_threads) as executor:
-                futures = [executor.submit(self._convert_event_file, f, tmp_dir) for f in eventfiles]
-                for future in tqdm(as_completed(futures), total=len(futures)):
-                    result = future.result()
-                    if result is not None:
-                        dfs.append(result)
-        if dfs:
-            return pd.concat(dfs).replace(" nan", float("nan"))
-        return pd.DataFrame()
 
     def _convert_photon_file(self, photonfile, tmp_dir):
         out_file = os.path.join(tmp_dir, f"{uuid.uuid4().hex}.csv")
@@ -109,23 +119,9 @@ class Analyse:
             print(f"Error processing {out_file}: {e}")
             return None
 
-    def _convert_photons(self, glob_string):
-        photonfiles = glob.glob(glob_string)
-        dfs = []
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmp_dir:
-            with ThreadPoolExecutor(max_workers=self.n_threads) as executor:
-                futures = [executor.submit(self._convert_photon_file, f, tmp_dir) for f in photonfiles]
-                for future in tqdm(as_completed(futures), total=len(futures)):
-                    result = future.result()
-                    if result is not None:
-                        dfs.append(result)
-        if dfs:
-            return pd.concat(dfs).replace(" nan", float("nan"))
-        return pd.DataFrame()
-
     def associate(self, time_norm_ns=1.0, spatial_norm_px=1.0, dSpace_px=np.inf, weight_px_in_s=None, max_dist_s=None, verbosity=1):
         """
-        Associate photons to events and store the result.
+        Associate photons to events in parallel per file pair.
 
         Args:
             time_norm_ns (float): Time normalization factor (ns) for simple association.
@@ -135,21 +131,42 @@ class Analyse:
             max_dist_s (float, optional): Max distance in seconds (lumacam association).
             verbosity (int): 0=silent, 1=summary, 2=debug.
         """
-        if self.photons_df is None or self.events_df is None:
-            raise ValueError("Load photons and events first.")
-        if self.use_lumacam:
-            self.associated_df = self._associate_photons_to_events(
-                self.photons_df, self.events_df, weight_px_in_s, max_dist_s, verbosity
-            )
+        if self.pair_dfs is None:
+            raise ValueError("Load data first using load().")
+        
+        def associate_pair(pair):
+            edf, pdf = pair
+            if self.use_lumacam:
+                return self._associate_photons_to_events(pdf, edf, weight_px_in_s, max_dist_s, verbosity=0)
+            else:
+                return self._associate_photons_to_events_simple(pdf, edf, time_norm_ns, spatial_norm_px, dSpace_px, verbosity=0)
+        
+        with ThreadPoolExecutor(max_workers=self.n_threads) as executor:
+            futures = [executor.submit(associate_pair, pair) for pair in self.pair_dfs]
+            associated_list = []
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Associating pairs"):
+                result = future.result()
+                if result is not None:
+                    associated_list.append(result)
+        
+        if associated_list:
+            self.associated_df = pd.concat(associated_list)
+            # Make event IDs unique across all pairs
+            event_col = 'assoc_cluster_id' if self.use_lumacam else 'assoc_event_id'
+            mask = self.associated_df['assoc_x'].notna()
+            if mask.any():
+                grouped = self.associated_df.loc[mask].groupby(['assoc_x', 'assoc_y', 'assoc_t', 'assoc_n', 'assoc_PSD'])
+                new_ids = grouped.ngroup() + 1
+                self.associated_df.loc[mask, event_col] = new_ids
+            if verbosity >= 1:
+                total = len(self.associated_df)
+                matched = self.associated_df[event_col].notna().sum()
+                print(f"✅ Matched {matched} of {total} photons ({100 * matched / total:.1f}%)")
         else:
-            self.associated_df = self._associate_photons_to_events_simple(
-                self.photons_df, self.events_df, time_norm_ns, spatial_norm_px, dSpace_px, verbosity
-            )
+            self.associated_df = pd.DataFrame()
 
+    # Rest of the class remains the same: _associate_photons_to_events, _associate_photons_to_events_simple, compute_ellipticity, _compute_event_ellipticity, plot_four, plot_event, get_combined_dataframe
     def _associate_photons_to_events(self, photons_df, events_df, weight_px_in_s, max_dist_s, verbosity):
-        """
-        Associates photons to events using lumacamTesting's shortest temporal+spatial connection.
-        """
         if not LUMACAM_AVAILABLE:
             raise ImportError("lumacamTesting is required for this method.")
         
@@ -159,14 +176,14 @@ class Analyse:
         def fix_time_with_progress(df, label="DataFrame"):
             df = df.sort_values("t_s").reset_index(drop=True)
             t_s = df["t_s"].to_numpy()
-            for i in tqdm(range(1, len(t_s)), desc=f"⏱ Fixing times: {label}", leave=False):
+            for i in range(1, len(t_s)):
                 if t_s[i] <= t_s[i - 1]:
                     t_s[i] = t_s[i - 1] + 1e-12
             df["t_s"] = t_s
             return df
 
-        photons = fix_time_with_progress(photons, label="Photons")
-        events = fix_time_with_progress(events, label="Events")
+        photons = fix_time_with_progress(photons)
+        events = fix_time_with_progress(events)
 
         if weight_px_in_s is None or max_dist_s is None:
             all_x = pd.concat([photons['x_px'], events['x_px']])
@@ -174,7 +191,7 @@ class Analyse:
             all_t = pd.concat([photons['t_s'], events['t_s']])
             spatial_scale = np.sqrt(np.var(all_x) + np.var(all_y))
             temporal_scale = np.std(all_t)
-            weight_px_in_s = temporal_scale / spatial_scale
+            weight_px_in_s = temporal_scale / spatial_scale if spatial_scale > 0 else 1.0
             max_dist_s = 3 * temporal_scale
             if verbosity >= 2:
                 print(f"📏 Spatial scale: {spatial_scale:.2f}")
@@ -204,8 +221,7 @@ class Analyse:
         result_df["assoc_n"] = np.nan
         result_df["assoc_PSD"] = np.nan
 
-        iterator = tqdm(assoc.clusters.index, desc="🔗 Associating events", disable=(verbosity < 1))
-        for cluster_id in iterator:
+        for cluster_id in assoc.clusters.index:
             photon_indices = np.where(cluster_associations == cluster_id)[0]
             event_indices = np.where(cluster_event_indices == cluster_id)[0]
             if len(event_indices) > 0:
@@ -216,11 +232,6 @@ class Analyse:
                 result_df.loc[photon_indices, "assoc_y"] = event["y_px"]
                 result_df.loc[photon_indices, "assoc_n"] = event.get("n", np.nan)
                 result_df.loc[photon_indices, "assoc_PSD"] = event.get("PSD", np.nan)
-
-        if verbosity >= 1:
-            total = len(result_df)
-            associated = result_df['assoc_cluster_id'].notna().sum()
-            print(f"✅ Associated {associated} / {total} photons ({100 * associated / total:.1f}%)")
 
         return result_df
 
@@ -242,8 +253,7 @@ class Analyse:
         photon_times = photons['t'].to_numpy()
         photon_x = photons['x'].to_numpy()
         photon_y = photons['y'].to_numpy()
-        iterator = tqdm(events.iterrows(), total=len(events), desc="🔗 Associating events")
-        for i, event in iterator:
+        for i, event in events.iterrows():
             n_photons = int(event['n'])
             ex, ey, et = event['x'], event['y'], event['t']
             eid = event['event_id']
@@ -279,21 +289,19 @@ class Analyse:
                     photons.loc[idx, 'assoc_PSD'] = event['PSD']
                     photons.loc[idx, 'time_diff_ns'] = time_diff[idx]
                     photons.loc[idx, 'spatial_diff_px'] = spatial_diff[idx]
-        if verbosity >= 1:
-            total = len(photons)
-            matched = photons['assoc_event_id'].notna().sum()
-            print(f"✅ Matched {matched} of {total} photons ({100 * matched / total:.1f}%)")
         return photons
 
-    def compute_ellipticity(self, x_col='x', y_col='y', event_col='assoc_event_id', verbosity=1):
+    def compute_ellipticity(self, x_col='x', y_col='y', event_col=None, verbosity=1):
         """
         Compute ellipticity for associated events.
 
         Args:
             x_col, y_col (str): Column names for spatial coordinates.
-            event_col (str): Column name for event ID (or 'assoc_cluster_id' for lumacam).
+            event_col (str, optional): Column name for event ID. Defaults to 'assoc_cluster_id' if use_lumacam, else 'assoc_event_id'.
             verbosity (int): 0 = silent, 1 = print summary.
         """
+        if event_col is None:
+            event_col = 'assoc_cluster_id' if self.use_lumacam else 'assoc_event_id'
         if self.associated_df is None:
             raise ValueError("Associate photons and events first.")
         self.associated_df = self._compute_event_ellipticity(
@@ -331,18 +339,9 @@ class Analyse:
         return df
 
     def plot_four(self, name="run", min_n=1, max_n=1000, min_psd=1e-10, max_psd=1, df=None):
-        """
-        Plot four diagnostic plots for events.
-
-        Args:
-            name (str): Title prefix.
-            min_n, max_n (int): Range for n.
-            min_psd, max_psd (float): Range for PSD.
-            df (pd.DataFrame, optional): DataFrame to plot (defaults to self.events_df).
-        """
         if df is None:
             if self.events_df is None:
-                raise ValueError("Load events first.")
+                raise ValueError("Load data first.")
             df = self.events_df
         fig, ax = plt.subplots(2, 2, figsize=(8, 6), sharex=False, sharey=False)
         df.query("0<tof<1e-6").plot.hexbin(x="tof", y="PSD", bins="log", yscale="log", ax=ax[0][0], cmap="turbo", gridsize=100)
@@ -356,21 +355,13 @@ class Analyse:
         plt.subplots_adjust(hspace=0.32, wspace=0.32)
         plt.show()
 
-    def plot_event(self, event_id, df=None, event_col='assoc_event_id', x_col='x', y_col='y', title=None):
-        """
-        Plot a specific event, showing associated photons and event center.
-
-        Args:
-            event_id (int): ID of the event to plot (from assoc_event_id or assoc_cluster_id).
-            df (pd.DataFrame, optional): DataFrame to plot (defaults to self.associated_df).
-            event_col (str): Column name for event ID (e.g., 'assoc_event_id' or 'assoc_cluster_id').
-            x_col, y_col (str): Column names for spatial coordinates.
-            title (str, optional): Plot title.
-        """
+    def plot_event(self, event_id, df=None, event_col=None, x_col='x', y_col='y', title=None):
         if df is None:
             if self.associated_df is None:
                 raise ValueError("Associate photons and events first.")
             df = self.associated_df
+        if event_col is None:
+            event_col = 'assoc_cluster_id' if self.use_lumacam else 'assoc_event_id'
         event_data = df[df[event_col] == event_id]
         if event_data.empty:
             print(f"No data found for event ID {event_id}")
@@ -386,12 +377,6 @@ class Analyse:
         plt.show()
 
     def get_combined_dataframe(self):
-        """
-        Get the combined DataFrame with associated photon and event information.
-
-        Returns:
-            pd.DataFrame: The associated DataFrame.
-        """
         if self.associated_df is None:
             raise ValueError("Associate photons and events first.")
         return self.associated_df
