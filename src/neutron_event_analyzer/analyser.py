@@ -344,4 +344,54 @@ class Analyse:
             if self.events_df is None:
                 raise ValueError("Load events first.")
             df = self.events_df
-        fig, ax = plt.subplots(2,
+        fig, ax = plt.subplots(2, 2, figsize=(8, 6), sharex=False, sharey=False)
+        df.query("0<tof<1e-6").plot.hexbin(x="tof", y="PSD", bins="log", yscale="log", ax=ax[0][0], cmap="turbo", gridsize=100)
+        df.query("0<tof<1e-6").plot.hexbin(x="n", y="PSD", bins="log", yscale="log", ax=ax[0][1], cmap="turbo")
+        df.query("0<tof<1e-6").plot.hexbin(x="tof", y="n", bins="log", ax=ax[1][0], cmap="turbo")
+        df.query("0<tof<1e-6 and @min_n<n<@max_n and @min_psd<PSD<@max_psd").tof.plot.hist(
+            bins=np.arange(0, 1e-6, 1.5625e-9), histtype="step", ax=ax[1][1],
+            label=f"n:({min_n},{max_n}) PSD:({min_psd},{max_psd})", legend=True
+        )
+        fig.suptitle(name, y=0.94)
+        plt.subplots_adjust(hspace=0.32, wspace=0.32)
+        plt.show()
+
+    def plot_event(self, event_id, df=None, event_col='assoc_event_id', x_col='x', y_col='y', title=None):
+        """
+        Plot a specific event, showing associated photons and event center.
+
+        Args:
+            event_id (int): ID of the event to plot (from assoc_event_id or assoc_cluster_id).
+            df (pd.DataFrame, optional): DataFrame to plot (defaults to self.associated_df).
+            event_col (str): Column name for event ID (e.g., 'assoc_event_id' or 'assoc_cluster_id').
+            x_col, y_col (str): Column names for spatial coordinates.
+            title (str, optional): Plot title.
+        """
+        if df is None:
+            if self.associated_df is None:
+                raise ValueError("Associate photons and events first.")
+            df = self.associated_df
+        event_data = df[df[event_col] == event_id]
+        if event_data.empty:
+            print(f"No data found for event ID {event_id}")
+            return
+        fig, ax = plt.subplots(figsize=(6, 6))
+        ax.scatter(event_data[x_col], event_data[y_col], c='blue', label='Photons', alpha=0.6)
+        if 'assoc_x' in event_data.columns and 'assoc_y' in event_data.columns:
+            ax.scatter(event_data['assoc_x'].iloc[0], event_data['assoc_y'].iloc[0], c='red', marker='x', s=100, label='Event Center')
+        ax.set_xlabel('X (pixels)')
+        ax.set_ylabel('Y (pixels)')
+        ax.legend()
+        ax.set_title(title if title else f'Event {event_id}')
+        plt.show()
+
+    def get_combined_dataframe(self):
+        """
+        Get the combined DataFrame with associated photon and event information.
+
+        Returns:
+            pd.DataFrame: The associated DataFrame.
+        """
+        if self.associated_df is None:
+            raise ValueError("Associate photons and events first.")
+        return self.associated_df

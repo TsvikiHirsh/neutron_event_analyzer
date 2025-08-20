@@ -1,2 +1,4 @@
 src/neutron_event_analyzer.egg-info
 build
+src/neutron_event_analyzer/analyser.py
+notebooks/.ipynb_checkpoints
