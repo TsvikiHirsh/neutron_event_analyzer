@@ -29,8 +29,8 @@ class Analyse:
         from paired files. It supports multiple association methods:
         - 'lumacam': Uses lumacamTesting library (requires installation).
         - 'kdtree': Full KDTree-based association on normalized space-time coordinates.
-        - 'windowed': Time-windowed KDTree for nearly time-sorted data, using symmetric window.
-        - 'simple_window': Simple forward time-window association, selecting closest photons in space,
+        - 'window': Time-window KDTree for nearly time-sorted data, using symmetric window.
+        - 'simple': Simple forward time-window association, selecting closest photons in space,
           with center-of-mass check. Optimized for speed with small windows.
 
         Args:
@@ -169,13 +169,13 @@ class Analyse:
 
         Args:
             pair (tuple): Tuple of (event_df, photon_df).
-            time_norm_ns (float): Time normalization factor (ns) for 'kdtree' and 'windowed' methods.
-            spatial_norm_px (float): Spatial normalization factor (px) for 'kdtree' and 'windowed' methods.
+            time_norm_ns (float): Time normalization factor (ns) for 'kdtree' and 'window' methods.
+            spatial_norm_px (float): Spatial normalization factor (px) for 'kdtree' and 'window' methods.
             dSpace_px (float): Max allowed center-of-mass distance for multiphoton matches.
             weight_px_in_s (float, optional): Weight for pixel-to-second conversion ('lumacam').
-            max_time_s (float, optional): Max time duration in seconds ('lumacam', 'windowed', 'simple_window').
+            max_time_s (float, optional): Max time duration in seconds ('lumacam', 'window', 'simple').
             verbosity (int): 0=silent, 1=summary, 2=debug.
-            method (str): Association method: 'lumacam', 'kdtree', 'windowed', 'simple_window'.
+            method (str): Association method: 'lumacam', 'kdtree', 'window', 'simple'.
 
         Returns:
             pandas.DataFrame: Associated photon DataFrame, or None if processing fails.
@@ -200,9 +200,9 @@ class Analyse:
                 result = self._associate_photons_to_events(pdf, edf, weight_px_in_s, max_time_s, verbosity)
             elif method == 'kdtree':
                 result = self._associate_photons_to_events_kdtree(pdf, edf, time_norm_ns, spatial_norm_px, dSpace_px, verbosity)
-            elif method == 'windowed':
-                result = self._associate_photons_to_events_windowed(pdf, edf, time_norm_ns, spatial_norm_px, dSpace_px, max_time_s, verbosity)
-            elif method == 'simple_window':
+            elif method == 'window':
+                result = self._associate_photons_to_events_window(pdf, edf, time_norm_ns, spatial_norm_px, dSpace_px, max_time_s, verbosity)
+            elif method == 'simple':
                 result = self._associate_photons_to_events_simple_window(pdf, edf, dSpace_px, max_time_s, verbosity)
             else:
                 raise ValueError(f"Unknown association method: {method}")
@@ -221,25 +221,25 @@ class Analyse:
 
         This method processes each pair of loaded event and photon DataFrames independently,
         associates photons to events based on the chosen method, and concatenates the results.
-        For time-windowed methods ('windowed', 'simple_window'), data is assumed to be almost sorted by time for efficiency.
-        The 'simple_window' method uses a forward time window [event_t, event_t + max_time_s] and selects the spatially closest
+        For time-window methods ('window', 'simple'), data is assumed to be almost sorted by time for efficiency.
+        The 'simple' method uses a forward time window [event_t, event_t + max_time_s] and selects the spatially closest
         photons, assigning only if the center-of-mass (or single photon) distance is within dSpace_px.
 
         Args:
-            time_norm_ns (float): Time normalization factor in nanoseconds for 'kdtree' and 'windowed' methods.
-            spatial_norm_px (float): Spatial normalization factor in pixels for 'kdtree' and 'windowed' methods.
+            time_norm_ns (float): Time normalization factor in nanoseconds for 'kdtree' and 'window' methods.
+            spatial_norm_px (float): Spatial normalization factor in pixels for 'kdtree' and 'window' methods.
             dSpace_px (float): Maximum allowed center-of-mass (or single photon) distance in pixels.
             weight_px_in_s (float, optional): Weight for converting pixels to seconds ('lumacam' method).
             max_time_ns (float, optional): Maximum time duration in nanoseconds (default: 500). Converted to seconds internally.
-                                          For 'lumacam' and 'windowed', if None, computed as 3 * std of times.
-                                          For 'simple_window', default 500 ns if not provided.
+                                          For 'lumacam' and 'window', if None, computed as 3 * std of times.
+                                          For 'simple', default 500 ns if not provided.
             verbosity (int): Verbosity level: 0=silent, 1=summary, 2=debug.
             method (str): Association method:
                 - 'auto': Uses 'lumacam' if enabled and available, else 'kdtree'.
                 - 'lumacam': Uses lumacamTesting library (requires installation).
                 - 'kdtree': Full KDTree-based association.
-                - 'windowed': Symmetric time-windowed KDTree.
-                - 'simple_window': Forward time-window with spatial closest selection and CoG check (fast for small windows).
+                - 'window': Symmetric time-window KDTree.
+                - 'simple': Forward time-window with spatial closest selection and CoG check (fast for small windows).
         """
         if self.pair_dfs is None:
             raise ValueError("Load data first using load().")
@@ -478,11 +478,11 @@ class Analyse:
         photons['assoc_status'] = photons['assoc_status'].astype('category')
         return photons
 
-    def _associate_photons_to_events_windowed(
+    def _associate_photons_to_events_window(
         self, photons_df, events_df, time_norm_ns, spatial_norm_px, dSpace_px, max_time_s, verbosity
     ):
         """
-        Associate photons to events using a time-windowed KDTree.
+        Associate photons to events using a time-window KDTree.
 
         This is more efficient when photons/events are almost sorted by time.
         It uses a symmetric sliding window [-max_time_s, +max_time_s] to build local KDTrees.
