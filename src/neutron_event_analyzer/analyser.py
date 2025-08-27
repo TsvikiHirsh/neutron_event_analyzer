@@ -209,7 +209,8 @@ class Analyse:
             # Log number of matched photons
             event_col = 'assoc_cluster_id' if method == 'lumacam' else 'assoc_event_id'
             matched = result[event_col].notna().sum()
-            logging.info(f"Finished association for pair with {len(edf)} events, {matched} photons matched")
+            if verbosity>1:
+                logging.info(f"Finished association for pair with {len(edf)} events, {matched} photons matched")
             return result
         except Exception as e:
             logging.error(f"Error associating pair with {len(edf)} events using method '{method}': {e}")
