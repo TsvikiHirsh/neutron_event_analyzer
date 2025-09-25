@@ -71,7 +71,7 @@ class Analyse:
             return event_df, photon_df
         return None
 
-    def load(self, event_glob="eventFiles/*.empirevent", photon_glob="photonFiles/*.empirphot"):
+    def load(self, event_glob="[Ee]ventFiles/*.empirevent", photon_glob="[Pp]hotonFiles/*.empirphot"):
         """
         Load paired event and photon files independently without concatenating into single DataFrames initially.
 
@@ -128,7 +128,7 @@ class Analyse:
         export_bin = os.path.join(self.export_dir, "empir_export_events")
         os.system(f"{export_bin} {eventfile} {out_file} csv")
         try:
-            df = pd.read_csv(out_file).query("` PSD value` > 0")
+            df = pd.read_csv(out_file).query("` PSD value` >= 0")
             df.columns = ["x", "y", "t", "n", "PSD", "tof"]
             df["tof"] = df["tof"].astype(float)
             df["PSD"] = df["PSD"].astype(float)
