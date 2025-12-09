@@ -71,7 +71,7 @@ class Analyse:
             return event_df, photon_df
         return None
 
-    def load(self, event_glob="[Ee]ventFiles/*.empirevent", photon_glob="[Pp]hotonFiles/*.empirphot"):
+    def load(self, event_glob="[Ee]ventFiles/*.empirevent", photon_glob="[Pp]hotonFiles/*.empirphot", limit=None, query=None):
         """
         Load paired event and photon files independently without concatenating into single DataFrames initially.
 
@@ -81,6 +81,8 @@ class Analyse:
         Args:
             event_glob (str, optional): Glob pattern relative to data_folder for event files.
             photon_glob (str, optional): Glob pattern relative to data_folder for photon files.
+            limit (int, optional): If provided, limit the number of rows loaded for both events and photons.
+            query (str, optional): If provided, apply a pandas query string to filter the events dataframe (e.g., "n>2").
         """
         event_files = glob.glob(os.path.join(self.data_folder, event_glob))
         photon_files = glob.glob(os.path.join(self.data_folder, photon_glob))
@@ -108,6 +110,24 @@ class Analyse:
         if self.pair_dfs:
             self.events_df = pd.concat([edf for edf, pdf in self.pair_dfs], ignore_index=True).replace(" nan", float("nan"))
             self.photons_df = pd.concat([pdf for edf, pdf in self.pair_dfs], ignore_index=True).replace(" nan", float("nan"))
+
+            # Apply query filter to events if provided
+            if query is not None:
+                original_events_len = len(self.events_df)
+                self.events_df = self.events_df.query(query)
+                print(f"Applied query '{query}': {original_events_len} -> {len(self.events_df)} events")
+
+            # Apply limit to both dataframes if provided
+            if limit is not None:
+                self.events_df = self.events_df.head(limit)
+                self.photons_df = self.photons_df.head(limit)
+                print(f"Applied limit of {limit} rows to events and photons.")
+
+            # Update pair_dfs to reflect the filtered data for association
+            if query is not None or limit is not None:
+                self.pair_dfs = [(self.events_df, self.photons_df)]
+                print(f"Updated pair_dfs with filtered data for association.")
+
             print(f"Loaded {len(self.events_df)} events and {len(self.photons_df)} photons in total.")
         else:
             self.events_df = pd.DataFrame()
