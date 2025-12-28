@@ -20,29 +20,16 @@ def temp_data_dir(test_data_dir):
 
     This fixture:
     1. Copies the test data to a temp directory
-    2. Fixes the photon CSV filename to match the binary file basename
-    3. Fixes the photon CSV column name (toa -> t)
-    4. Ensures event CSV has the correct format with ' PSD value' column
+    2. CSV files are already correctly named and formatted in the source data
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         # Copy structure
         temp_neutrons = os.path.join(tmpdir, "neutrons")
         shutil.copytree(test_data_dir, temp_neutrons)
 
-        # Fix photon CSV - rename file to match binary basename
-        old_photon_csv = os.path.join(temp_neutrons, "ExportedPhotons", "exported_traced_data_0.csv")
-        new_photon_csv = os.path.join(temp_neutrons, "ExportedPhotons", "traced_data_0.csv")
-
-        if os.path.exists(old_photon_csv):
-            # Read and fix column names
-            df = pd.read_csv(old_photon_csv)
-            if 'toa' in df.columns:
-                df = df.rename(columns={'toa': 't'})
-            df.to_csv(new_photon_csv, index=False)
-            os.remove(old_photon_csv)
-
-        # Event CSV should already be in correct format
-        # No modification needed - the code now handles both formats
+        # CSV files in source data are already correctly named and formatted
+        # - traced_data_0.csv in ExportedPhotons matches traced_data_0.empirphot
+        # - traced_data_0.csv in ExportedEvents matches traced_data_0.empirevent
 
         yield temp_neutrons
 

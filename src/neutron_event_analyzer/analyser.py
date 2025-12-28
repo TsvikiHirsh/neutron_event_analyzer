@@ -59,25 +59,26 @@ class Analyse:
         self.associated_df = None
         self.assoc_method = None
 
-    def _process_pair(self, pair, tmp_dir):
+    def _process_pair(self, pair, tmp_dir, verbosity=0):
         """
         Process a pair of event and photon files by converting them to CSV and loading into DataFrames.
 
         Args:
             pair (tuple): Tuple of (event_file, photon_file) paths.
             tmp_dir (str): Path to temporary directory for CSV output.
+            verbosity (int): Verbosity level (0=silent, 1=warnings).
 
         Returns:
             tuple: (event_df, photon_df) if successful, None otherwise.
         """
         event_file, photon_file = pair
-        event_df = self._convert_event_file(event_file, tmp_dir)
-        photon_df = self._convert_photon_file(photon_file, tmp_dir)
+        event_df = self._convert_event_file(event_file, tmp_dir, verbosity)
+        photon_df = self._convert_photon_file(photon_file, tmp_dir, verbosity)
         if event_df is not None and photon_df is not None:
             return event_df, photon_df
         return None
 
-    def load(self, event_glob="[Ee]ventFiles/*.empirevent", photon_glob="[Pp]hotonFiles/*.empirphot", limit=None, query=None):
+    def load(self, event_glob="[Ee]ventFiles/*.empirevent", photon_glob="[Pp]hotonFiles/*.empirphot", limit=None, query=None, verbosity=0):
         """
         Load paired event and photon files independently without concatenating into single DataFrames initially.
 
@@ -91,6 +92,7 @@ class Analyse:
             photon_glob (str, optional): Glob pattern relative to data_folder for photon files.
             limit (int, optional): If provided, limit the number of rows loaded for both events and photons.
             query (str, optional): If provided, apply a pandas query string to filter the events dataframe (e.g., "n>2").
+            verbosity (int, optional): Verbosity level (0=silent, 1=warnings). Default is 0.
         """
         event_files = glob.glob(os.path.join(self.data_folder, event_glob))
         photon_files = glob.glob(os.path.join(self.data_folder, photon_glob))
@@ -107,7 +109,7 @@ class Analyse:
 
         with tempfile.TemporaryDirectory(dir="/tmp") as tmp_dir:
             with ProcessPoolExecutor(max_workers=self.n_threads) as executor:
-                futures = [executor.submit(self._process_pair, pair, tmp_dir) for pair in self.pair_files]
+                futures = [executor.submit(self._process_pair, pair, tmp_dir, verbosity) for pair in self.pair_files]
                 self.pair_dfs = []
                 for future in tqdm(as_completed(futures), total=len(futures), desc="Loading pairs"):
                     result = future.result()
@@ -141,7 +143,7 @@ class Analyse:
             self.events_df = pd.DataFrame()
             self.photons_df = pd.DataFrame()
 
-    def _convert_event_file(self, eventfile, tmp_dir):
+    def _convert_event_file(self, eventfile, tmp_dir, verbosity=0):
         """
         Convert an event file to CSV and load it into a DataFrame.
 
@@ -152,6 +154,7 @@ class Analyse:
         Args:
             eventfile (str): Path to the event file.
             tmp_dir (str): Temporary directory for output CSV (used only if conversion is needed).
+            verbosity (int): Verbosity level (0=silent, 1=warnings).
 
         Returns:
             pd.DataFrame: Loaded event DataFrame, or None on error.
@@ -170,7 +173,8 @@ class Analyse:
             # Fall back to empir binary conversion
             export_bin = os.path.join(self.export_dir, "empir_export_events")
             if not os.path.exists(export_bin):
-                print(f"Error: empir_export_events binary not found at {export_bin} and no exported CSV found at {exported_csv}")
+                if verbosity >= 1:
+                    print(f"Warning: empir_export_events binary not found at {export_bin} and no exported CSV found at {exported_csv}")
                 return None
 
             csv_file = os.path.join(tmp_dir, f"{uuid.uuid4().hex}.csv")
@@ -202,7 +206,7 @@ class Analyse:
             print(f"Error processing {csv_file}: {e}")
             return None
 
-    def _convert_photon_file(self, photonfile, tmp_dir):
+    def _convert_photon_file(self, photonfile, tmp_dir, verbosity=0):
         """
         Convert a photon file to CSV and load it into a DataFrame.
 
@@ -213,6 +217,7 @@ class Analyse:
         Args:
             photonfile (str): Path to the photon file.
             tmp_dir (str): Temporary directory for output CSV (used only if conversion is needed).
+            verbosity (int): Verbosity level (0=silent, 1=warnings).
 
         Returns:
             pd.DataFrame: Loaded photon DataFrame, or None on error.
@@ -231,7 +236,8 @@ class Analyse:
             # Fall back to empir binary conversion
             export_bin = os.path.join(self.export_dir, "empir_export_photons")
             if not os.path.exists(export_bin):
-                print(f"Error: empir_export_photons binary not found at {export_bin} and no exported CSV found at {exported_csv}")
+                if verbosity >= 1:
+                    print(f"Warning: empir_export_photons binary not found at {export_bin} and no exported CSV found at {exported_csv}")
                 return None
 
             csv_file = os.path.join(tmp_dir, f"{uuid.uuid4().hex}.csv")
@@ -895,3 +901,36 @@ class Analyse:
         if self.associated_df is None:
             raise ValueError("Associate photons and events first.")
         return self.associated_df
+
+    def plot_event(self, event_id, x_col='x', y_col='y', title=None):
+        """
+        Plot a specific event with its associated photons.
+
+        This is a convenience method that wraps Plotter.plot_event().
+
+        Args:
+            event_id: ID of the event to plot.
+            x_col (str): Column name for x-coordinate (default: 'x').
+            y_col (str): Column name for y-coordinate (default: 'y').
+            title (str, optional): Custom title for the plot.
+
+        Raises:
+            ValueError: If association has not been performed.
+        """
+        if self.associated_df is None:
+            raise ValueError("Associate photons and events first.")
+
+        # Import Plotter here to avoid circular import
+        from .plotter import Plotter
+
+        # Determine event column based on association method
+        event_col = 'assoc_cluster_id' if self.assoc_method == 'lumacam' else 'assoc_event_id'
+
+        Plotter.plot_event(
+            event_id=event_id,
+            df=self.associated_df,
+            event_col=event_col,
+            x_col=x_col,
+            y_col=y_col,
+            title=title
+        )
