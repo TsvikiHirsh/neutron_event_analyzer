@@ -33,9 +33,15 @@ class Analyse:
         - 'simple': Simple forward time-window association, selecting closest photons in space,
           with center-of-mass check. Optimized for speed with small windows.
 
+        The class can work with either:
+        1. Pre-exported CSV files in 'ExportedEvents' and 'ExportedPhotons' subdirectories (preferred), or
+        2. Original .empirevent and .empirphot files (requires empir binaries in export_dir)
+
         Args:
-            data_folder (str): Path to the data folder containing 'photonFiles' and 'eventFiles' subdirectories.
+            data_folder (str): Path to the data folder containing 'photonFiles'/'eventFiles' subdirectories
+                              and optionally 'ExportedPhotons'/'ExportedEvents' subdirectories with CSV files.
             export_dir (str): Path to the directory containing export binaries (empir_export_events, empir_export_photons).
+                             Only required if pre-exported CSV files are not available.
             n_threads (int): Number of threads for parallel processing (default: 10).
             use_lumacam (bool): If True, prefer 'lumacam' for association when method='auto' (if available).
         """
@@ -75,8 +81,10 @@ class Analyse:
         """
         Load paired event and photon files independently without concatenating into single DataFrames initially.
 
-        This method identifies paired files based on matching base filenames (excluding extensions),
-        converts them to CSV using external binaries, and loads them into DataFrames for each pair.
+        This method identifies paired files based on matching base filenames (excluding extensions).
+        For each file, it first checks for pre-exported CSV files in ExportedEvents/ExportedPhotons folders.
+        If CSV files exist, they are used directly. Otherwise, it falls back to converting the original
+        files using empir binaries.
 
         Args:
             event_glob (str, optional): Glob pattern relative to data_folder for event files.
@@ -135,44 +143,103 @@ class Analyse:
 
     def _convert_event_file(self, eventfile, tmp_dir):
         """
-        Convert an event file to CSV using the empir_export_events binary and load it into a DataFrame.
+        Convert an event file to CSV and load it into a DataFrame.
+
+        First checks for an already exported CSV file in the ExportedEvents subfolder.
+        If found, uses that file directly. Otherwise, falls back to using the
+        empir_export_events binary to convert the .empirevent file.
 
         Args:
             eventfile (str): Path to the event file.
-            tmp_dir (str): Temporary directory for output CSV.
+            tmp_dir (str): Temporary directory for output CSV (used only if conversion is needed).
 
         Returns:
             pd.DataFrame: Loaded event DataFrame, or None on error.
         """
-        out_file = os.path.join(tmp_dir, f"{uuid.uuid4().hex}.csv")
-        export_bin = os.path.join(self.export_dir, "empir_export_events")
-        os.system(f"{export_bin} {eventfile} {out_file} csv")
+        # Get the base filename without extension
+        basename = os.path.splitext(os.path.basename(eventfile))[0]
+
+        # Check for already exported CSV in ExportedEvents folder
+        exported_csv = os.path.join(self.data_folder, "ExportedEvents", f"{basename}.csv")
+
+        if os.path.exists(exported_csv):
+            # Use already exported CSV
+            logging.info(f"Using existing CSV: {exported_csv}")
+            csv_file = exported_csv
+        else:
+            # Fall back to empir binary conversion
+            export_bin = os.path.join(self.export_dir, "empir_export_events")
+            if not os.path.exists(export_bin):
+                print(f"Error: empir_export_events binary not found at {export_bin} and no exported CSV found at {exported_csv}")
+                return None
+
+            csv_file = os.path.join(tmp_dir, f"{uuid.uuid4().hex}.csv")
+            logging.info(f"Converting {eventfile} using empir_export_events")
+            os.system(f"{export_bin} {eventfile} {csv_file} csv")
+
         try:
-            df = pd.read_csv(out_file).query("` PSD value` >= 0")
-            df.columns = ["x", "y", "t", "n", "PSD", "tof"]
+            df = pd.read_csv(csv_file)
+
+            # Handle two CSV formats:
+            # 1. empir export format: has ' PSD value' column that needs to be filtered
+            # 2. Pre-processed format: already has correct columns without ' PSD value'
+            if ' PSD value' in df.columns:
+                # empir export format - filter and rename
+                # Use boolean indexing instead of query to handle backtick-quoted column names
+                df = df[df[' PSD value'] >= 0]
+                df.columns = ["x", "y", "t", "n", "PSD", "tof"]
+            elif df.columns.tolist() == ["x", "y", "t", "n", "PSD", "tof"]:
+                # Already in correct format - just filter by PSD >= 0
+                df = df[df['PSD'] >= 0]
+            else:
+                print(f"Warning: Unexpected event CSV format with columns: {df.columns.tolist()}")
+                return None
+
             df["tof"] = df["tof"].astype(float)
             df["PSD"] = df["PSD"].astype(float)
             return df
         except Exception as e:
-            print(f"Error processing {out_file}: {e}")
+            print(f"Error processing {csv_file}: {e}")
             return None
 
     def _convert_photon_file(self, photonfile, tmp_dir):
         """
-        Convert a photon file to CSV using the empir_export_photons binary and load it into a DataFrame.
+        Convert a photon file to CSV and load it into a DataFrame.
+
+        First checks for an already exported CSV file in the ExportedPhotons subfolder.
+        If found, uses that file directly. Otherwise, falls back to using the
+        empir_export_photons binary to convert the .empirphot file.
 
         Args:
             photonfile (str): Path to the photon file.
-            tmp_dir (str): Temporary directory for output CSV.
+            tmp_dir (str): Temporary directory for output CSV (used only if conversion is needed).
 
         Returns:
             pd.DataFrame: Loaded photon DataFrame, or None on error.
         """
-        out_file = os.path.join(tmp_dir, f"{uuid.uuid4().hex}.csv")
-        export_bin = os.path.join(self.export_dir, "empir_export_photons")
-        os.system(f"{export_bin} {photonfile} {out_file} csv")
+        # Get the base filename without extension
+        basename = os.path.splitext(os.path.basename(photonfile))[0]
+
+        # Check for already exported CSV in ExportedPhotons folder
+        exported_csv = os.path.join(self.data_folder, "ExportedPhotons", f"{basename}.csv")
+
+        if os.path.exists(exported_csv):
+            # Use already exported CSV
+            logging.info(f"Using existing CSV: {exported_csv}")
+            csv_file = exported_csv
+        else:
+            # Fall back to empir binary conversion
+            export_bin = os.path.join(self.export_dir, "empir_export_photons")
+            if not os.path.exists(export_bin):
+                print(f"Error: empir_export_photons binary not found at {export_bin} and no exported CSV found at {exported_csv}")
+                return None
+
+            csv_file = os.path.join(tmp_dir, f"{uuid.uuid4().hex}.csv")
+            logging.info(f"Converting {photonfile} using empir_export_photons")
+            os.system(f"{export_bin} {photonfile} {csv_file} csv")
+
         try:
-            df = pd.read_csv(out_file)
+            df = pd.read_csv(csv_file)
             df.columns = ["x", "y", "t", "tof"]
             df["x"] = df["x"].astype(float)
             df["y"] = df["y"].astype(float)
@@ -180,7 +247,7 @@ class Analyse:
             df["tof"] = pd.to_numeric(df["tof"], errors="coerce")
             return df
         except Exception as e:
-            print(f"Error processing {out_file}: {e}")
+            print(f"Error processing {csv_file}: {e}")
             return None
 
     def _associate_pair(self, pair, time_norm_ns, spatial_norm_px, dSpace_px, weight_px_in_s, max_time_s, verbosity, method):

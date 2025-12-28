@@ -5,3 +5,5 @@ notebooks/.ipynb_checkpoints
 data
 empir
 export
+src/neutron_event_analyzer/__pycache__
+tests/__pycache__
