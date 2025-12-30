@@ -184,6 +184,9 @@ class Analyse:
         try:
             df = pd.read_csv(csv_file)
 
+            if verbosity >= 2:
+                print(f"Read CSV with shape {df.shape}, columns: {df.columns.tolist()}")
+
             # Handle two CSV formats:
             # 1. empir export format: has ' PSD value' column that needs to be filtered
             # 2. Pre-processed format: already has correct columns without ' PSD value'
@@ -192,18 +195,30 @@ class Analyse:
                 # Use boolean indexing instead of query to handle backtick-quoted column names
                 df = df[df[' PSD value'] >= 0]
                 df.columns = ["x", "y", "t", "n", "PSD", "tof"]
+                if verbosity >= 2:
+                    print(f"After filtering empir format: shape {df.shape}")
             elif df.columns.tolist() == ["x", "y", "t", "n", "PSD", "tof"]:
                 # Already in correct format - just filter by PSD >= 0
+                initial_len = len(df)
                 df = df[df['PSD'] >= 0]
+                if verbosity >= 2:
+                    print(f"After PSD filter: {initial_len} -> {len(df)} rows")
             else:
-                print(f"Warning: Unexpected event CSV format with columns: {df.columns.tolist()}")
+                if verbosity >= 1:
+                    print(f"Warning: Unexpected event CSV format with columns: {df.columns.tolist()}")
                 return None
 
             df["tof"] = df["tof"].astype(float)
             df["PSD"] = df["PSD"].astype(float)
+
+            if len(df) == 0:
+                if verbosity >= 1:
+                    print(f"Warning: Event DataFrame is empty after processing {os.path.basename(csv_file)}")
+
             return df
         except Exception as e:
-            print(f"Error processing {csv_file}: {e}")
+            if verbosity >= 1:
+                print(f"Error processing {csv_file}: {e}")
             return None
 
     def _convert_photon_file(self, photonfile, tmp_dir, verbosity=0):
@@ -246,14 +261,27 @@ class Analyse:
 
         try:
             df = pd.read_csv(csv_file)
+
+            if verbosity >= 2:
+                print(f"Read photon CSV with shape {df.shape}, columns: {df.columns.tolist()}")
+
             df.columns = ["x", "y", "t", "tof"]
             df["x"] = df["x"].astype(float)
             df["y"] = df["y"].astype(float)
             df["t"] = df["t"].astype(float)
             df["tof"] = pd.to_numeric(df["tof"], errors="coerce")
+
+            if len(df) == 0:
+                if verbosity >= 1:
+                    print(f"Warning: Photon DataFrame is empty after processing {os.path.basename(csv_file)}")
+
             return df
         except Exception as e:
-            print(f"Error processing {csv_file}: {e}")
+            if verbosity >= 1:
+                print(f"Error processing photon file {csv_file}: {e}")
+            import traceback
+            if verbosity >= 2:
+                traceback.print_exc()
             return None
 
     def _associate_pair(self, pair, time_norm_ns, spatial_norm_px, dSpace_px, weight_px_in_s, max_time_s, verbosity, method):
