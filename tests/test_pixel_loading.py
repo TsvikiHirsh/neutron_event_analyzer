@@ -84,10 +84,10 @@ class TestPixelPhotonAssociation:
     def test_associate_pixels_to_photons(self, temp_data_dir):
         """Test basic pixel-photon association."""
         analyser = nea.Analyse(data_folder=temp_data_dir, n_threads=1)
-        analyser.load(load_events=False, load_photons=True, load_pixels=True, verbosity=0)
+        analyser.load(events=False, photons=True, pixels=True, verbosity=0)
 
         # Perform 2-tier association (pixels → photons)
-        result_df = analyser.associate_full(
+        result_df = analyser.associate(
             pixel_max_dist_px=10.0,
             pixel_max_time_ns=1000,
             verbosity=1
@@ -111,10 +111,10 @@ class TestPixelPhotonAssociation:
     def test_full_three_tier_association(self, temp_data_dir):
         """Test full three-tier association: pixels → photons → events."""
         analyser = nea.Analyse(data_folder=temp_data_dir, n_threads=1)
-        analyser.load(load_events=True, load_photons=True, load_pixels=True, verbosity=0)
+        analyser.load(events=True, photons=True, pixels=True, verbosity=0)
 
         # Perform 3-tier association
-        result_df = analyser.associate_full(
+        result_df = analyser.associate(
             pixel_max_dist_px=10.0,
             pixel_max_time_ns=1000,
             photon_dSpace_px=50.0,
@@ -142,8 +142,8 @@ class TestSaveAssociations:
     def test_save_associations_csv(self, temp_data_dir, tmp_path):
         """Test saving association results as CSV."""
         analyser = nea.Analyse(data_folder=temp_data_dir, n_threads=1)
-        analyser.load(load_photons=True, load_pixels=True, verbosity=0)
-        analyser.associate_full(verbosity=0)
+        analyser.load(photons=True, pixels=True, verbosity=0)
+        analyser.associate(verbosity=0)
 
         # Save to temporary directory
         output_path = analyser.save_associations(

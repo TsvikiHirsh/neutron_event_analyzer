@@ -9,6 +9,7 @@ import uuid
 from scipy.spatial import cKDTree
 import logging
 import json
+from .config import DEFAULT_PARAMS
 
 # Check for lumacamTesting availability
 try:
@@ -18,8 +19,9 @@ try:
 except ImportError:
     LUMACAM_AVAILABLE = False
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
+# Configure logging (will be adjusted per-instance based on verbosity)
+logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 class Analyse:
     def __init__(self, data_folder, export_dir="./export", n_threads=10, use_lumacam=False, settings=None):
@@ -68,10 +70,10 @@ class Analyse:
 
     def _load_settings(self, settings):
         """
-        Load settings from a JSON file or dictionary.
+        Load settings from a named preset, JSON file, or dictionary.
 
         Args:
-            settings (str, dict, or None): Path to JSON file or settings dictionary.
+            settings (str, dict, or None): Named preset (e.g., 'in_focus'), path to JSON file, or settings dictionary.
 
         Returns:
             dict: Settings dictionary with empir parameters.
@@ -83,9 +85,14 @@ class Analyse:
             return settings
 
         if isinstance(settings, str):
-            # Assume it's a path to a JSON file
+            # Check if it's a named preset first
+            if settings in DEFAULT_PARAMS:
+                return DEFAULT_PARAMS[settings]
+
+            # Otherwise assume it's a path to a JSON file
             if not os.path.exists(settings):
-                print(f"Warning: Settings file not found: {settings}")
+                print(f"Warning: Settings file not found and not a named preset: {settings}")
+                print(f"Available presets: {list(DEFAULT_PARAMS.keys())}")
                 return {}
             try:
                 with open(settings, 'r') as f:
@@ -151,8 +158,10 @@ class Analyse:
         return None
 
     def load(self, event_glob="[Ee]ventFiles/*.empirevent", photon_glob="[Pp]hotonFiles/*.empirphot",
-             pixel_glob="[Tt]px3Files/*.tpx3", load_events=True, load_photons=True, load_pixels=False,
-             limit=None, query=None, verbosity=0):
+             pixel_glob="[Tt]px3Files/*.tpx3", events=True, photons=True, pixels=False,
+             limit=None, query=None, verbosity=0,
+             # Backward compatibility - deprecated
+             load_events=None, load_photons=None, load_pixels=None):
         """
         Load paired event, photon, and optionally pixel files.
 
@@ -165,32 +174,48 @@ class Analyse:
             event_glob (str, optional): Glob pattern relative to data_folder for event files.
             photon_glob (str, optional): Glob pattern relative to data_folder for photon files.
             pixel_glob (str, optional): Glob pattern relative to data_folder for pixel (TPX3) files.
-            load_events (bool, optional): Whether to load events (default: True).
-            load_photons (bool, optional): Whether to load photons (default: True).
-            load_pixels (bool, optional): Whether to load pixels (default: False).
+            events (bool, optional): Whether to load events (default: True).
+            photons (bool, optional): Whether to load photons (default: True).
+            pixels (bool, optional): Whether to load pixels (default: False).
             limit (int, optional): If provided, limit the number of rows loaded for all data types.
             query (str, optional): If provided, apply a pandas query string to filter the events dataframe (e.g., "n>2").
-            verbosity (int, optional): Verbosity level (0=silent, 1=warnings). Default is 0.
+            verbosity (int, optional): Verbosity level (0=silent, 1=normal, 2=debug). Default is 0.
         """
+        # Backward compatibility with old parameter names
+        if load_events is not None:
+            events = load_events
+        if load_photons is not None:
+            photons = load_photons
+        if load_pixels is not None:
+            pixels = load_pixels
+
+        # Configure logging based on verbosity
+        if verbosity >= 2:
+            logger.setLevel(logging.DEBUG)
+        elif verbosity >= 1:
+            logger.setLevel(logging.INFO)
+        else:
+            logger.setLevel(logging.WARNING)
+
         def get_key(f):
             return os.path.basename(f).rsplit('.', 1)[0]
 
         # Load event-photon pairs if requested
-        if load_events or load_photons:
-            event_files = glob.glob(os.path.join(self.data_folder, event_glob)) if load_events else []
-            photon_files = glob.glob(os.path.join(self.data_folder, photon_glob)) if load_photons else []
+        if events or photons:
+            event_files = glob.glob(os.path.join(self.data_folder, event_glob)) if events else []
+            photon_files = glob.glob(os.path.join(self.data_folder, photon_glob)) if photons else []
 
             event_dict = {get_key(f): f for f in event_files}
             photon_dict = {get_key(f): f for f in photon_files}
 
-            if load_events and load_photons:
+            if events and photons:
                 common_keys = sorted(set(event_dict) & set(photon_dict))
                 self.pair_files = [(event_dict[k], photon_dict[k]) for k in common_keys]
                 print(f"Found {len(self.pair_files)} paired event-photon files.")
-            elif load_events:
+            elif events:
                 self.pair_files = [(event_dict[k], None) for k in sorted(event_dict.keys())]
                 print(f"Found {len(self.pair_files)} event files.")
-            else:  # load_photons only
+            else:  # photons only
                 self.pair_files = [(None, photon_dict[k]) for k in sorted(photon_dict.keys())]
                 print(f"Found {len(self.pair_files)} photon files.")
 
@@ -204,37 +229,37 @@ class Analyse:
                             self.pair_dfs.append(result)
 
             # Concatenate for full DataFrames
-            if self.pair_dfs and load_events:
+            if self.pair_dfs and events:
                 self.events_df = pd.concat([edf for edf, pdf in self.pair_dfs if edf is not None], ignore_index=True).replace(" nan", float("nan"))
             else:
                 self.events_df = pd.DataFrame()
 
-            if self.pair_dfs and load_photons:
+            if self.pair_dfs and photons:
                 self.photons_df = pd.concat([pdf for edf, pdf in self.pair_dfs if pdf is not None], ignore_index=True).replace(" nan", float("nan"))
             else:
                 self.photons_df = pd.DataFrame()
 
             # Apply query filter to events if provided
-            if query is not None and load_events and len(self.events_df) > 0:
+            if query is not None and events and len(self.events_df) > 0:
                 original_events_len = len(self.events_df)
                 self.events_df = self.events_df.query(query)
                 print(f"Applied query '{query}': {original_events_len} -> {len(self.events_df)} events")
 
             # Apply limit if provided
             if limit is not None:
-                if load_events and len(self.events_df) > 0:
+                if events and len(self.events_df) > 0:
                     self.events_df = self.events_df.head(limit)
-                if load_photons and len(self.photons_df) > 0:
+                if photons and len(self.photons_df) > 0:
                     self.photons_df = self.photons_df.head(limit)
                 print(f"Applied limit of {limit} rows.")
 
             # Update pair_dfs to reflect the filtered data for association
             if query is not None or limit is not None:
-                if load_events and load_photons:
+                if events and photons:
                     self.pair_dfs = [(self.events_df, self.photons_df)]
                     print(f"Updated pair_dfs with filtered data for association.")
 
-            if load_events or load_photons:
+            if events or photons:
                 status_parts = []
                 if load_events:
                     status_parts.append(f"{len(self.events_df)} events")
@@ -243,7 +268,7 @@ class Analyse:
                 print(f"Loaded {' and '.join(status_parts)} in total.")
 
         # Load pixels if requested
-        if load_pixels:
+        if pixels:
             pixel_files = glob.glob(os.path.join(self.data_folder, pixel_glob))
             pixel_dict = {get_key(f): f for f in pixel_files}
 
@@ -295,7 +320,7 @@ class Analyse:
 
         if os.path.exists(exported_csv):
             # Use already exported CSV
-            logging.info(f"Using existing CSV: {exported_csv}")
+            logger.info(f"Using existing CSV: {exported_csv}")
             csv_file = exported_csv
         else:
             # Fall back to empir binary conversion
@@ -306,7 +331,7 @@ class Analyse:
                 return None
 
             csv_file = os.path.join(tmp_dir, f"{uuid.uuid4().hex}.csv")
-            logging.info(f"Converting {eventfile} using empir_export_events")
+            logger.info(f"Converting {eventfile} using empir_export_events")
             os.system(f"{export_bin} {eventfile} {csv_file} csv")
 
         try:
@@ -373,7 +398,7 @@ class Analyse:
 
         if os.path.exists(exported_csv):
             # Use already exported CSV
-            logging.info(f"Using existing CSV: {exported_csv}")
+            logger.info(f"Using existing CSV: {exported_csv}")
             csv_file = exported_csv
         else:
             # Fall back to empir binary conversion
@@ -384,7 +409,7 @@ class Analyse:
                 return None
 
             csv_file = os.path.join(tmp_dir, f"{uuid.uuid4().hex}.csv")
-            logging.info(f"Converting {photonfile} using empir_export_photons")
+            logger.info(f"Converting {photonfile} using empir_export_photons")
             os.system(f"{export_bin} {photonfile} {csv_file} csv")
 
         try:
@@ -436,7 +461,7 @@ class Analyse:
 
         if os.path.exists(exported_csv):
             # Use already exported CSV
-            logging.info(f"Using existing CSV: {exported_csv}")
+            logger.info(f"Using existing CSV: {exported_csv}")
             csv_file = exported_csv
         else:
             # Fall back to empir binary conversion
@@ -447,7 +472,7 @@ class Analyse:
                 return None
 
             csv_file = os.path.join(tmp_dir, f"{uuid.uuid4().hex}.csv")
-            logging.info(f"Converting {pixelfile} using empir_pixel2photon")
+            logger.info(f"Converting {pixelfile} using empir_pixel2photon")
             # Note: empir_pixel2photon might need additional parameters
             os.system(f"{export_bin} {pixelfile} {csv_file}")
 
@@ -520,16 +545,16 @@ class Analyse:
         required_event_cols = ['x', 'y', 't', 'n', 'PSD']
         required_photon_cols = ['x', 'y', 't']
         if not all(col in edf.columns for col in required_event_cols):
-            logging.error(f"Event DataFrame missing required columns: {required_event_cols}")
+            logger.error(f"Event DataFrame missing required columns: {required_event_cols}")
             return None
         if not all(col in pdf.columns for col in required_photon_cols):
-            logging.error(f"Photon DataFrame missing required columns: {required_photon_cols}")
+            logger.error(f"Photon DataFrame missing required columns: {required_photon_cols}")
             return None
         # Check for excessive NaNs
         if edf[required_event_cols].isna().any().any() or pdf[required_photon_cols].isna().any().any():
-            logging.warning(f"NaN values detected in event or photon DataFrame for pair")
+            logger.warning(f"NaN values detected in event or photon DataFrame for pair")
         if verbosity >= 2:
-            logging.info(f"Starting association for pair with {len(edf)} events and {len(pdf)} photons using method '{method}'")
+            logger.info(f"Starting association for pair with {len(edf)} events and {len(pdf)} photons using method '{method}'")
         try:
             if method == 'lumacam':
                 result = self._associate_photons_to_events(pdf, edf, weight_px_in_s, max_time_s, verbosity)
@@ -545,13 +570,13 @@ class Analyse:
             event_col = 'assoc_cluster_id' if method == 'lumacam' else 'assoc_event_id'
             matched = result[event_col].notna().sum()
             if verbosity>1:
-                logging.info(f"Finished association for pair with {len(edf)} events, {matched} photons matched")
+                logger.info(f"Finished association for pair with {len(edf)} events, {matched} photons matched")
             return result
         except Exception as e:
-            logging.error(f"Error associating pair with {len(edf)} events using method '{method}': {e}")
+            logger.error(f"Error associating pair with {len(edf)} events using method '{method}': {e}")
             return None
 
-    def associate(self, time_norm_ns=1.0, spatial_norm_px=1.0, dSpace_px=np.inf, weight_px_in_s=None, max_time_ns=500, verbosity=1, method='auto'):
+    def associate_photons_events(self, time_norm_ns=1.0, spatial_norm_px=1.0, dSpace_px=np.inf, weight_px_in_s=None, max_time_ns=500, verbosity=1, method='auto'):
         """
         Associate photons to events in parallel per file pair using the specified method.
 
@@ -609,7 +634,7 @@ class Analyse:
         if associated_list:
             # Concatenate with ignore_index to avoid index duplication
             self.associated_df = pd.concat(associated_list, ignore_index=True)
-            logging.info(f"Before grouping: {self.associated_df['assoc_x'].notna().sum()} photons with non-NaN assoc_x")
+            logger.info(f"Before grouping: {self.associated_df['assoc_x'].notna().sum()} photons with non-NaN assoc_x")
             mask = self.associated_df['assoc_x'].notna() & self.associated_df['assoc_y'].notna() & \
                    self.associated_df['assoc_t'].notna() & self.associated_df['assoc_n'].notna() & \
                    self.associated_df['assoc_PSD'].notna()
@@ -617,20 +642,20 @@ class Analyse:
                 grouped = self.associated_df.loc[mask].groupby(['assoc_x', 'assoc_y', 'assoc_t', 'assoc_n', 'assoc_PSD'])
                 new_ids = grouped.ngroup() + 1
                 self.associated_df.loc[mask, event_col] = new_ids
-                logging.info(f"After grouping: {self.associated_df[event_col].notna().sum()} photons with non-NaN {event_col}")
+                logger.info(f"After grouping: {self.associated_df[event_col].notna().sum()} photons with non-NaN {event_col}")
             else:
-                logging.warning("No photons with all non-NaN assoc columns for grouping")
+                logger.warning("No photons with all non-NaN assoc columns for grouping")
             if verbosity >= 1:
                 total = len(self.associated_df)
                 matched = self.associated_df[event_col].notna().sum()
                 print(f"✅ Matched {matched} of {total} photons ({100 * matched / total:.1f}%)")
         else:
             self.associated_df = pd.DataFrame()
-            logging.warning("No valid association results to concatenate")
+            logger.warning("No valid association results to concatenate")
 
-    def associate_full(self, pixel_max_dist_px=None, pixel_max_time_ns=None,
-                      photon_time_norm_ns=1.0, photon_spatial_norm_px=1.0, photon_dSpace_px=None,
-                      max_time_ns=None, verbosity=1, method='simple'):
+    def associate(self, pixel_max_dist_px=None, pixel_max_time_ns=None,
+                  photon_time_norm_ns=1.0, photon_spatial_norm_px=1.0, photon_dSpace_px=None,
+                  max_time_ns=None, verbosity=1, method='simple'):
         """
         Perform full three-tier association: pixels → photons → events.
 
@@ -708,7 +733,7 @@ class Analyse:
             # Step 2: Associate photons to events
             if verbosity >= 1:
                 print("\nStep 2/2: Associating photons to events...")
-            self.associate(
+            self.associate_photons_events(
                 time_norm_ns=photon_time_norm_ns,
                 spatial_norm_px=photon_spatial_norm_px,
                 dSpace_px=photon_dSpace_px,
@@ -717,47 +742,50 @@ class Analyse:
                 method=method
             )
 
+            # Step 3: Merge event information into pixel dataframe
+            if verbosity >= 1:
+                print("\nStep 3/3: Merging pixel-photon-event associations...")
+
             # Merge: Add event association info to pixels
-            # Match pixels to photons, then photons to events
             photons_with_events = self.associated_df.copy()
-
-            # Create a mapping from photon index to event info
-            photons_with_events['photon_idx'] = photons_with_events.index
-
-            # Merge pixels with their photon info (already in pixels_associated)
-            # Then merge with event info from photons
             event_col = 'assoc_cluster_id' if self.assoc_method == 'lumacam' else 'assoc_event_id'
 
-            # For each pixel, find its associated photon and copy event info
-            pixels_full = pixels_associated.copy()
-            pixels_full['assoc_event_id'] = np.nan
-            pixels_full['assoc_x'] = np.nan
-            pixels_full['assoc_y'] = np.nan
-            pixels_full['assoc_t'] = np.nan
-            pixels_full['assoc_n'] = np.nan
-            pixels_full['assoc_PSD'] = np.nan
+            # Prepare photons dataframe with event info for merging
+            # Round coordinates to avoid floating point precision issues
+            photons_with_events['_merge_x'] = photons_with_events['x'].round(6)
+            photons_with_events['_merge_y'] = photons_with_events['y'].round(6)
+            photons_with_events['_merge_t'] = photons_with_events['t'].round(12)
 
-            # Match by photon position and time (since we don't have original photon IDs in associated_df)
-            for idx, pixel in pixels_full.iterrows():
-                if not np.isnan(pixel['assoc_photon_id']):
-                    # Find matching photon in photons_with_events
-                    phot_x, phot_y, phot_t = pixel['assoc_phot_x'], pixel['assoc_phot_y'], pixel['assoc_phot_t']
-                    matches = photons_with_events[
-                        (np.abs(photons_with_events['x'] - phot_x) < 0.01) &
-                        (np.abs(photons_with_events['y'] - phot_y) < 0.01) &
-                        (np.abs(photons_with_events['t'] - phot_t) < 1e-9)
-                    ]
-                    if len(matches) > 0:
-                        match = matches.iloc[0]
-                        if not np.isnan(match.get(event_col, np.nan)):
-                            pixels_full.loc[idx, 'assoc_event_id'] = match[event_col]
-                            pixels_full.loc[idx, 'assoc_x'] = match['assoc_x']
-                            pixels_full.loc[idx, 'assoc_y'] = match['assoc_y']
-                            pixels_full.loc[idx, 'assoc_t'] = match['assoc_t']
-                            pixels_full.loc[idx, 'assoc_n'] = match['assoc_n']
-                            pixels_full.loc[idx, 'assoc_PSD'] = match['assoc_PSD']
+            # Prepare pixels dataframe
+            pixels_full = pixels_associated.copy()
+            pixels_full['_merge_x'] = pixels_full['assoc_phot_x'].round(6)
+            pixels_full['_merge_y'] = pixels_full['assoc_phot_y'].round(6)
+            pixels_full['_merge_t'] = pixels_full['assoc_phot_t'].round(12)
+
+            # Select only needed columns from photons to merge
+            photon_event_cols = photons_with_events[['_merge_x', '_merge_y', '_merge_t',
+                                                     event_col, 'assoc_x', 'assoc_y', 'assoc_t',
+                                                     'assoc_n', 'assoc_PSD']].copy()
+
+            # Rename event columns to avoid conflicts
+            photon_event_cols = photon_event_cols.rename(columns={event_col: 'assoc_event_id'})
+
+            # Merge pixels with event info via photon coordinates
+            pixels_full = pixels_full.merge(
+                photon_event_cols,
+                on=['_merge_x', '_merge_y', '_merge_t'],
+                how='left',
+                suffixes=('', '_event')
+            )
+
+            # Clean up temporary merge columns
+            pixels_full = pixels_full.drop(columns=['_merge_x', '_merge_y', '_merge_t'])
 
             self.associated_df = pixels_full
+
+            if verbosity >= 1:
+                n_pixels_with_events = pixels_full['assoc_event_id'].notna().sum()
+                print(f"✅ {n_pixels_with_events} pixels associated through full chain to events")
 
         # Case 2: Pixels → Photons only
         elif has_pixels and has_photons:
@@ -774,7 +802,7 @@ class Analyse:
         elif has_photons and has_events:
             if verbosity >= 1:
                 print("\nPerforming standard Photons → Events association")
-            self.associate(
+            self.associate_photons_events(
                 time_norm_ns=photon_time_norm_ns,
                 spatial_norm_px=photon_spatial_norm_px,
                 dSpace_px=photon_dSpace_px,

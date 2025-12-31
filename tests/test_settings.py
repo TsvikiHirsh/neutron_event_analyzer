@@ -111,7 +111,7 @@ class TestSettingsInAssociation:
     """Test that settings are used in association methods."""
 
     def test_associate_full_uses_settings(self, temp_data_dir):
-        """Test that associate_full uses settings defaults."""
+        """Test that associate uses settings defaults."""
         settings = {
             "pixel2photon": {
                 "dSpace": 15.0,
@@ -124,10 +124,10 @@ class TestSettingsInAssociation:
         }
 
         analyser = nea.Analyse(data_folder=temp_data_dir, settings=settings, n_threads=1)
-        analyser.load(load_pixels=True, load_photons=True, load_events=True, verbosity=0)
+        analyser.load(pixels=True, photons=True, events=True, verbosity=0)
 
-        # Call associate_full without parameters - should use settings
-        result = analyser.associate_full(verbosity=0)
+        # Call associate without parameters - should use settings
+        result = analyser.associate(verbosity=0)
 
         # Just verify it runs without error and returns results
         assert result is not None
@@ -143,10 +143,10 @@ class TestSettingsInAssociation:
         }
 
         analyser = nea.Analyse(data_folder=temp_data_dir, settings=settings, n_threads=1)
-        analyser.load(load_pixels=True, load_photons=True, load_events=True, verbosity=0)
+        analyser.load(pixels=True, photons=True, events=True, verbosity=0)
 
         # Call with explicit parameter - should override settings
-        result = analyser.associate_full(pixel_max_dist_px=5.0, verbosity=0)
+        result = analyser.associate(pixel_max_dist_px=5.0, verbosity=0)
 
         assert result is not None
         assert len(result) > 0
