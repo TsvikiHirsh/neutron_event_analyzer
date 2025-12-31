@@ -274,7 +274,88 @@ analyser.load(
 )
 ```
 
+### Using Settings Files for Association Parameters
+
+You can provide empir configuration parameters via a settings JSON file or dictionary. These parameters will be used as defaults for association methods, making it easier to maintain consistency with your empir analysis pipeline.
+
+#### Settings File Structure
+
+```json
+{
+    "pixel2photon": {
+        "dSpace": 2,
+        "dTime": 100e-09,
+        "nPxMin": 8,
+        "nPxMax": 100,
+        "TDC1": true
+    },
+    "photon2event": {
+        "dSpace_px": 50.0,
+        "dTime_s": 5e-08,
+        "durationMax_s": 5e-07,
+        "dTime_ext": 5
+    }
+}
+```
+
+#### Usage with Settings File
+
+```python
+import neutron_event_analyzer as nea
+
+# Option 1: Load settings from JSON file
+analyser = nea.Analyse(
+    data_folder='/path/to/data',
+    settings='path/to/settings.json'
+)
+
+# Option 2: Use settings dictionary
+settings = {
+    "pixel2photon": {
+        "dSpace": 10.0,      # pixels
+        "dTime": 1000e-09,   # seconds → converted to ns
+    },
+    "photon2event": {
+        "dSpace_px": 50.0,   # pixels
+        "dTime_s": 500e-09,  # seconds → converted to ns
+    }
+}
+
+analyser = nea.Analyse(
+    data_folder='/path/to/data',
+    settings=settings
+)
+
+# Load and associate - parameters from settings are used as defaults
+analyser.load(load_pixels=True, load_photons=True, load_events=True)
+analyser.associate_full(verbosity=1)  # Uses settings defaults
+
+# You can still override specific parameters
+analyser.associate_full(
+    pixel_max_dist_px=15.0,  # Override setting
+    verbosity=1
+)
+```
+
+**Parameter Mapping:**
+- `pixel2photon.dSpace` → `pixel_max_dist_px` (pixels)
+- `pixel2photon.dTime` → `pixel_max_time_ns` (seconds → nanoseconds)
+- `photon2event.dSpace_px` → `photon_dSpace_px` (pixels)
+- `photon2event.dTime_s` → `max_time_ns` (seconds → nanoseconds)
+
 ## API Reference
+
+### Analyse Class
+
+#### `__init__()`
+Initialize the Analyse object.
+
+**Parameters:**
+- `data_folder` (str): Path to the data folder containing input files
+- `export_dir` (str): Path to directory with empir binaries (default: `"./export"`)
+- `n_threads` (int): Number of threads for parallel processing (default: `10`)
+- `use_lumacam` (bool): Prefer lumacam for association when `method='auto'` (default: `False`)
+- `settings` (str or dict): Path to settings JSON file or settings dictionary with empir parameters (default: `None`)
 
 ### Main Methods
 
@@ -313,12 +394,12 @@ Associate photons to events using various methods.
 Perform multi-tier association: pixels → photons → events.
 
 **Parameters:**
-- `pixel_max_dist_px` (float): Maximum spatial distance for pixel-photon matching in pixels (default: `5.0`)
-- `pixel_max_time_ns` (float): Maximum time difference for pixel-photon matching in nanoseconds (default: `500`)
+- `pixel_max_dist_px` (float, optional): Maximum spatial distance for pixel-photon matching in pixels. If None, uses value from settings or defaults to `5.0`
+- `pixel_max_time_ns` (float, optional): Maximum time difference for pixel-photon matching in nanoseconds. If None, uses value from settings or defaults to `500`
 - `photon_time_norm_ns` (float): Time normalization for photon-event association (default: `1.0`)
 - `photon_spatial_norm_px` (float): Spatial normalization for photon-event association (default: `1.0`)
-- `photon_dSpace_px` (float): Maximum spatial distance for photon-event association (default: `50.0`)
-- `max_time_ns` (float): Maximum time window for photon-event association (default: `500`)
+- `photon_dSpace_px` (float, optional): Maximum spatial distance for photon-event association. If None, uses value from settings or defaults to `50.0`
+- `max_time_ns` (float, optional): Maximum time window for photon-event association in nanoseconds. If None, uses value from settings or defaults to `500`
 - `method` (str): Association method for photon-event - 'auto', 'kdtree', 'window', 'simple' (default: `'simple'`)
 - `verbosity` (int): Verbosity level (default: `1`)
 
@@ -328,6 +409,7 @@ Perform multi-tier association: pixels → photons → events.
 - If pixels, photons, and events are loaded: performs 3-tier association (pixels → photons → events)
 - If only pixels and photons are loaded: performs 2-tier association (pixels → photons)
 - If only photons and events are loaded: performs standard photon-event association
+- Parameters marked as optional can be provided via settings file/dict or will use hard-coded defaults
 
 #### `save_associations()`
 Save association results to disk.

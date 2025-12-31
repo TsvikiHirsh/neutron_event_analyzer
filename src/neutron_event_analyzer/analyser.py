@@ -8,6 +8,7 @@ import tempfile
 import uuid
 from scipy.spatial import cKDTree
 import logging
+import json
 
 # Check for lumacamTesting availability
 try:
@@ -21,7 +22,7 @@ except ImportError:
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
 class Analyse:
-    def __init__(self, data_folder, export_dir="./export", n_threads=10, use_lumacam=False):
+    def __init__(self, data_folder, export_dir="./export", n_threads=10, use_lumacam=False, settings=None):
         """
         Initialize the Analyse object.
 
@@ -44,6 +45,8 @@ class Analyse:
                              Only required if pre-exported CSV files are not available.
             n_threads (int): Number of threads for parallel processing (default: 10).
             use_lumacam (bool): If True, prefer 'lumacam' for association when method='auto' (if available).
+            settings (str or dict, optional): Path to settings JSON file or settings dictionary containing empir parameters.
+                                             These parameters will be used as defaults for association methods.
         """
         self.data_folder = data_folder
         self.export_dir = export_dir
@@ -59,6 +62,72 @@ class Analyse:
         self.pixels_df = None  # NEW: Pixel DataFrame
         self.associated_df = None
         self.assoc_method = None
+
+        # Load settings
+        self.settings = self._load_settings(settings)
+
+    def _load_settings(self, settings):
+        """
+        Load settings from a JSON file or dictionary.
+
+        Args:
+            settings (str, dict, or None): Path to JSON file or settings dictionary.
+
+        Returns:
+            dict: Settings dictionary with empir parameters.
+        """
+        if settings is None:
+            return {}
+
+        if isinstance(settings, dict):
+            return settings
+
+        if isinstance(settings, str):
+            # Assume it's a path to a JSON file
+            if not os.path.exists(settings):
+                print(f"Warning: Settings file not found: {settings}")
+                return {}
+            try:
+                with open(settings, 'r') as f:
+                    return json.load(f)
+            except Exception as e:
+                print(f"Warning: Failed to load settings from {settings}: {e}")
+                return {}
+
+        print(f"Warning: Invalid settings type: {type(settings)}. Expected str, dict, or None.")
+        return {}
+
+    def _get_association_defaults(self):
+        """
+        Extract association parameters from settings.
+
+        Returns:
+            dict: Dictionary with default association parameters.
+        """
+        defaults = {}
+
+        if not self.settings:
+            return defaults
+
+        # Extract pixel2photon parameters
+        if 'pixel2photon' in self.settings:
+            p2p = self.settings['pixel2photon']
+            if 'dSpace' in p2p:
+                defaults['pixel_max_dist_px'] = float(p2p['dSpace'])
+            if 'dTime' in p2p:
+                # Convert seconds to nanoseconds
+                defaults['pixel_max_time_ns'] = float(p2p['dTime']) * 1e9
+
+        # Extract photon2event parameters
+        if 'photon2event' in self.settings:
+            p2e = self.settings['photon2event']
+            if 'dSpace_px' in p2e:
+                defaults['photon_dSpace_px'] = float(p2e['dSpace_px'])
+            if 'dTime_s' in p2e:
+                # Convert seconds to nanoseconds
+                defaults['max_time_ns'] = float(p2e['dTime_s']) * 1e9
+
+        return defaults
 
     def _process_pair(self, pair, tmp_dir, verbosity=0):
         """
@@ -559,9 +628,9 @@ class Analyse:
             self.associated_df = pd.DataFrame()
             logging.warning("No valid association results to concatenate")
 
-    def associate_full(self, pixel_max_dist_px=5.0, pixel_max_time_ns=500,
-                      photon_time_norm_ns=1.0, photon_spatial_norm_px=1.0, photon_dSpace_px=50.0,
-                      max_time_ns=500, verbosity=1, method='simple'):
+    def associate_full(self, pixel_max_dist_px=None, pixel_max_time_ns=None,
+                      photon_time_norm_ns=1.0, photon_spatial_norm_px=1.0, photon_dSpace_px=None,
+                      max_time_ns=None, verbosity=1, method='simple'):
         """
         Perform full three-tier association: pixels → photons → events.
 
@@ -571,12 +640,16 @@ class Analyse:
         depending on what was loaded.
 
         Args:
-            pixel_max_dist_px (float): Maximum spatial distance in pixels for pixel-photon association.
-            pixel_max_time_ns (float): Maximum time difference in nanoseconds for pixel-photon association.
+            pixel_max_dist_px (float, optional): Maximum spatial distance in pixels for pixel-photon association.
+                                                 If None, uses value from settings or defaults to 5.0.
+            pixel_max_time_ns (float, optional): Maximum time difference in nanoseconds for pixel-photon association.
+                                                 If None, uses value from settings or defaults to 500.
             photon_time_norm_ns (float): Time normalization for photon-event association.
             photon_spatial_norm_px (float): Spatial normalization for photon-event association.
-            photon_dSpace_px (float): Maximum center-of-mass distance for photon-event association.
-            max_time_ns (float): Maximum time window in nanoseconds (used for both associations if method supports it).
+            photon_dSpace_px (float, optional): Maximum center-of-mass distance for photon-event association.
+                                                If None, uses value from settings or defaults to 50.0.
+            max_time_ns (float, optional): Maximum time window in nanoseconds (used for both associations if method supports it).
+                                           If None, uses value from settings or defaults to 500.
             verbosity (int): Verbosity level (0=silent, 1=summary, 2=debug).
             method (str): Association method for photon-event association ('simple', 'kdtree', 'window', 'lumacam').
                          Pixel-photon association always uses simple method.
@@ -584,10 +657,30 @@ class Analyse:
         Returns:
             pd.DataFrame: The combined association dataframe (also stored in self.associated_df).
         """
+        # Get defaults from settings
+        defaults = self._get_association_defaults()
+
+        # Apply defaults if parameters are None
+        if pixel_max_dist_px is None:
+            pixel_max_dist_px = defaults.get('pixel_max_dist_px', 5.0)
+        if pixel_max_time_ns is None:
+            pixel_max_time_ns = defaults.get('pixel_max_time_ns', 500)
+        if photon_dSpace_px is None:
+            photon_dSpace_px = defaults.get('photon_dSpace_px', 50.0)
+        if max_time_ns is None:
+            max_time_ns = defaults.get('max_time_ns', 500)
+
         if verbosity >= 1:
             print("\n" + "="*70)
             print("Starting Full Multi-Tier Association")
             print("="*70)
+            if self.settings:
+                print("Using parameters from settings file" + (" (overridden where specified)" if any([
+                    pixel_max_dist_px != defaults.get('pixel_max_dist_px'),
+                    pixel_max_time_ns != defaults.get('pixel_max_time_ns'),
+                    photon_dSpace_px != defaults.get('photon_dSpace_px'),
+                    max_time_ns != defaults.get('max_time_ns')
+                ]) else ""))
 
         # Determine what data we have
         has_pixels = self.pixels_df is not None and len(self.pixels_df) > 0
