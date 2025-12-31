@@ -34,13 +34,13 @@ class Analyse:
           with center-of-mass check. Optimized for speed with small windows.
 
         The class can work with either:
-        1. Pre-exported CSV files in 'ExportedEvents' and 'ExportedPhotons' subdirectories (preferred), or
-        2. Original .empirevent and .empirphot files (requires empir binaries in export_dir)
+        1. Pre-exported CSV files in 'ExportedEvents', 'ExportedPhotons', and 'ExportedPixels' subdirectories (preferred), or
+        2. Original .empirevent, .empirphot, and .tpx3 files (requires empir binaries in export_dir)
 
         Args:
-            data_folder (str): Path to the data folder containing 'photonFiles'/'eventFiles' subdirectories
-                              and optionally 'ExportedPhotons'/'ExportedEvents' subdirectories with CSV files.
-            export_dir (str): Path to the directory containing export binaries (empir_export_events, empir_export_photons).
+            data_folder (str): Path to the data folder containing 'photonFiles'/'eventFiles'/'tpx3Files' subdirectories
+                              and optionally 'ExportedPhotons'/'ExportedEvents'/'ExportedPixels' subdirectories with CSV files.
+            export_dir (str): Path to the directory containing export binaries (empir_export_events, empir_export_photons, empir_pixel2photon).
                              Only required if pre-exported CSV files are not available.
             n_threads (int): Number of threads for parallel processing (default: 10).
             use_lumacam (bool): If True, prefer 'lumacam' for association when method='auto' (if available).
@@ -56,6 +56,7 @@ class Analyse:
         self.pair_dfs = None
         self.events_df = None
         self.photons_df = None
+        self.pixels_df = None  # NEW: Pixel DataFrame
         self.associated_df = None
         self.assoc_method = None
 
@@ -64,7 +65,7 @@ class Analyse:
         Process a pair of event and photon files by converting them to CSV and loading into DataFrames.
 
         Args:
-            pair (tuple): Tuple of (event_file, photon_file) paths.
+            pair (tuple): Tuple of (event_file, photon_file) paths. Either can be None.
             tmp_dir (str): Path to temporary directory for CSV output.
             verbosity (int): Verbosity level (0=silent, 1=warnings).
 
@@ -72,76 +73,134 @@ class Analyse:
             tuple: (event_df, photon_df) if successful, None otherwise.
         """
         event_file, photon_file = pair
-        event_df = self._convert_event_file(event_file, tmp_dir, verbosity)
-        photon_df = self._convert_photon_file(photon_file, tmp_dir, verbosity)
-        if event_df is not None and photon_df is not None:
+        event_df = self._convert_event_file(event_file, tmp_dir, verbosity) if event_file else None
+        photon_df = self._convert_photon_file(photon_file, tmp_dir, verbosity) if photon_file else None
+
+        # Return pair if at least one dataframe was loaded successfully
+        if event_df is not None or photon_df is not None:
             return event_df, photon_df
         return None
 
-    def load(self, event_glob="[Ee]ventFiles/*.empirevent", photon_glob="[Pp]hotonFiles/*.empirphot", limit=None, query=None, verbosity=0):
+    def load(self, event_glob="[Ee]ventFiles/*.empirevent", photon_glob="[Pp]hotonFiles/*.empirphot",
+             pixel_glob="[Tt]px3Files/*.tpx3", load_events=True, load_photons=True, load_pixels=False,
+             limit=None, query=None, verbosity=0):
         """
-        Load paired event and photon files independently without concatenating into single DataFrames initially.
+        Load paired event, photon, and optionally pixel files.
 
         This method identifies paired files based on matching base filenames (excluding extensions).
-        For each file, it first checks for pre-exported CSV files in ExportedEvents/ExportedPhotons folders.
+        For each file, it first checks for pre-exported CSV files in ExportedEvents/ExportedPhotons/ExportedPixels folders.
         If CSV files exist, they are used directly. Otherwise, it falls back to converting the original
         files using empir binaries.
 
         Args:
             event_glob (str, optional): Glob pattern relative to data_folder for event files.
             photon_glob (str, optional): Glob pattern relative to data_folder for photon files.
-            limit (int, optional): If provided, limit the number of rows loaded for both events and photons.
+            pixel_glob (str, optional): Glob pattern relative to data_folder for pixel (TPX3) files.
+            load_events (bool, optional): Whether to load events (default: True).
+            load_photons (bool, optional): Whether to load photons (default: True).
+            load_pixels (bool, optional): Whether to load pixels (default: False).
+            limit (int, optional): If provided, limit the number of rows loaded for all data types.
             query (str, optional): If provided, apply a pandas query string to filter the events dataframe (e.g., "n>2").
             verbosity (int, optional): Verbosity level (0=silent, 1=warnings). Default is 0.
         """
-        event_files = glob.glob(os.path.join(self.data_folder, event_glob))
-        photon_files = glob.glob(os.path.join(self.data_folder, photon_glob))
-
         def get_key(f):
             return os.path.basename(f).rsplit('.', 1)[0]
 
-        event_dict = {get_key(f): f for f in event_files}
-        photon_dict = {get_key(f): f for f in photon_files}
+        # Load event-photon pairs if requested
+        if load_events or load_photons:
+            event_files = glob.glob(os.path.join(self.data_folder, event_glob)) if load_events else []
+            photon_files = glob.glob(os.path.join(self.data_folder, photon_glob)) if load_photons else []
 
-        common_keys = sorted(set(event_dict) & set(photon_dict))
-        self.pair_files = [(event_dict[k], photon_dict[k]) for k in common_keys]
-        print(f"Found {len(self.pair_files)} paired files.")
+            event_dict = {get_key(f): f for f in event_files}
+            photon_dict = {get_key(f): f for f in photon_files}
 
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmp_dir:
-            with ProcessPoolExecutor(max_workers=self.n_threads) as executor:
-                futures = [executor.submit(self._process_pair, pair, tmp_dir, verbosity) for pair in self.pair_files]
-                self.pair_dfs = []
-                for future in tqdm(as_completed(futures), total=len(futures), desc="Loading pairs"):
-                    result = future.result()
-                    if result is not None:
-                        self.pair_dfs.append(result)
+            if load_events and load_photons:
+                common_keys = sorted(set(event_dict) & set(photon_dict))
+                self.pair_files = [(event_dict[k], photon_dict[k]) for k in common_keys]
+                print(f"Found {len(self.pair_files)} paired event-photon files.")
+            elif load_events:
+                self.pair_files = [(event_dict[k], None) for k in sorted(event_dict.keys())]
+                print(f"Found {len(self.pair_files)} event files.")
+            else:  # load_photons only
+                self.pair_files = [(None, photon_dict[k]) for k in sorted(photon_dict.keys())]
+                print(f"Found {len(self.pair_files)} photon files.")
 
-        # Optionally concatenate for full DataFrames
-        if self.pair_dfs:
-            self.events_df = pd.concat([edf for edf, pdf in self.pair_dfs], ignore_index=True).replace(" nan", float("nan"))
-            self.photons_df = pd.concat([pdf for edf, pdf in self.pair_dfs], ignore_index=True).replace(" nan", float("nan"))
+            with tempfile.TemporaryDirectory(dir="/tmp") as tmp_dir:
+                with ProcessPoolExecutor(max_workers=self.n_threads) as executor:
+                    futures = [executor.submit(self._process_pair, pair, tmp_dir, verbosity) for pair in self.pair_files]
+                    self.pair_dfs = []
+                    for future in tqdm(as_completed(futures), total=len(futures), desc="Loading event-photon pairs"):
+                        result = future.result()
+                        if result is not None:
+                            self.pair_dfs.append(result)
+
+            # Concatenate for full DataFrames
+            if self.pair_dfs and load_events:
+                self.events_df = pd.concat([edf for edf, pdf in self.pair_dfs if edf is not None], ignore_index=True).replace(" nan", float("nan"))
+            else:
+                self.events_df = pd.DataFrame()
+
+            if self.pair_dfs and load_photons:
+                self.photons_df = pd.concat([pdf for edf, pdf in self.pair_dfs if pdf is not None], ignore_index=True).replace(" nan", float("nan"))
+            else:
+                self.photons_df = pd.DataFrame()
 
             # Apply query filter to events if provided
-            if query is not None:
+            if query is not None and load_events and len(self.events_df) > 0:
                 original_events_len = len(self.events_df)
                 self.events_df = self.events_df.query(query)
                 print(f"Applied query '{query}': {original_events_len} -> {len(self.events_df)} events")
 
-            # Apply limit to both dataframes if provided
+            # Apply limit if provided
             if limit is not None:
-                self.events_df = self.events_df.head(limit)
-                self.photons_df = self.photons_df.head(limit)
-                print(f"Applied limit of {limit} rows to events and photons.")
+                if load_events and len(self.events_df) > 0:
+                    self.events_df = self.events_df.head(limit)
+                if load_photons and len(self.photons_df) > 0:
+                    self.photons_df = self.photons_df.head(limit)
+                print(f"Applied limit of {limit} rows.")
 
             # Update pair_dfs to reflect the filtered data for association
             if query is not None or limit is not None:
-                self.pair_dfs = [(self.events_df, self.photons_df)]
-                print(f"Updated pair_dfs with filtered data for association.")
+                if load_events and load_photons:
+                    self.pair_dfs = [(self.events_df, self.photons_df)]
+                    print(f"Updated pair_dfs with filtered data for association.")
 
-            print(f"Loaded {len(self.events_df)} events and {len(self.photons_df)} photons in total.")
-        else:
-            self.events_df = pd.DataFrame()
-            self.photons_df = pd.DataFrame()
+            if load_events or load_photons:
+                status_parts = []
+                if load_events:
+                    status_parts.append(f"{len(self.events_df)} events")
+                if load_photons:
+                    status_parts.append(f"{len(self.photons_df)} photons")
+                print(f"Loaded {' and '.join(status_parts)} in total.")
+
+        # Load pixels if requested
+        if load_pixels:
+            pixel_files = glob.glob(os.path.join(self.data_folder, pixel_glob))
+            pixel_dict = {get_key(f): f for f in pixel_files}
+
+            if verbosity >= 1:
+                print(f"Found {len(pixel_dict)} pixel files.")
+
+            with tempfile.TemporaryDirectory(dir="/tmp") as tmp_dir:
+                with ProcessPoolExecutor(max_workers=self.n_threads) as executor:
+                    futures = {executor.submit(self._convert_pixel_file, pfile, tmp_dir, verbosity): key
+                              for key, pfile in pixel_dict.items()}
+                    pixel_dfs = []
+                    for future in tqdm(as_completed(futures), total=len(futures), desc="Loading pixels"):
+                        result = future.result()
+                        if result is not None:
+                            pixel_dfs.append(result)
+
+            if pixel_dfs:
+                self.pixels_df = pd.concat(pixel_dfs, ignore_index=True).replace(" nan", float("nan"))
+
+                # Apply limit if provided
+                if limit is not None:
+                    self.pixels_df = self.pixels_df.head(limit)
+
+                print(f"Loaded {len(self.pixels_df)} pixels in total.")
+            else:
+                self.pixels_df = pd.DataFrame()
 
     def _convert_event_file(self, eventfile, tmp_dir, verbosity=0):
         """
@@ -284,6 +343,92 @@ class Analyse:
                 traceback.print_exc()
             return None
 
+    def _convert_pixel_file(self, pixelfile, tmp_dir, verbosity=0):
+        """
+        Convert a pixel file to CSV and load it into a DataFrame.
+
+        First checks for an already exported CSV file in the ExportedPixels subfolder.
+        If found, uses that file directly. Otherwise, falls back to using the
+        empir_pixel2photon binary to convert the .tpx3 file.
+
+        Args:
+            pixelfile (str): Path to the TPX3 pixel file.
+            tmp_dir (str): Temporary directory for output CSV (used only if conversion is needed).
+            verbosity (int): Verbosity level (0=silent, 1=warnings).
+
+        Returns:
+            pd.DataFrame: Loaded pixel DataFrame, or None on error.
+        """
+        # Get the base filename without extension
+        basename = os.path.splitext(os.path.basename(pixelfile))[0]
+
+        # Check for already exported CSV in ExportedPixels folder
+        exported_csv = os.path.join(self.data_folder, "ExportedPixels", f"{basename}.csv")
+
+        if os.path.exists(exported_csv):
+            # Use already exported CSV
+            logging.info(f"Using existing CSV: {exported_csv}")
+            csv_file = exported_csv
+        else:
+            # Fall back to empir binary conversion
+            export_bin = os.path.join(self.export_dir, "empir_pixel2photon")
+            if not os.path.exists(export_bin):
+                if verbosity >= 1:
+                    print(f"Warning: empir_pixel2photon binary not found at {export_bin} and no exported CSV found at {exported_csv}")
+                return None
+
+            csv_file = os.path.join(tmp_dir, f"{uuid.uuid4().hex}.csv")
+            logging.info(f"Converting {pixelfile} using empir_pixel2photon")
+            # Note: empir_pixel2photon might need additional parameters
+            os.system(f"{export_bin} {pixelfile} {csv_file}")
+
+        try:
+            df = pd.read_csv(csv_file)
+
+            if verbosity >= 2:
+                print(f"Read pixel CSV with shape {df.shape}, columns: {df.columns.tolist()}")
+
+            # Standardize column names
+            # Expected format: "x [px], y [px], t [s], tot [a.u.], t_relToExtTrigger [s]"
+            # or simplified: "x, y, t, tot, tof"
+
+            # Strip whitespace and remove units from column names
+            df.columns = [col.strip().split('[')[0].strip() for col in df.columns]
+
+            # Rename t_relToExtTrigger to tof for consistency
+            if 't_relToExtTrigger' in df.columns:
+                df.rename(columns={'t_relToExtTrigger': 'tof'}, inplace=True)
+
+            # Ensure we have the expected columns
+            expected_cols = ['x', 'y', 't', 'tot', 'tof']
+            if not all(col in df.columns for col in expected_cols):
+                if verbosity >= 1:
+                    print(f"Warning: Unexpected pixel CSV format. Expected {expected_cols}, got {df.columns.tolist()}")
+                return None
+
+            # Select and reorder columns
+            df = df[expected_cols]
+
+            # Convert data types
+            df["x"] = df["x"].astype(float)
+            df["y"] = df["y"].astype(float)
+            df["t"] = df["t"].astype(float)
+            df["tot"] = pd.to_numeric(df["tot"], errors="coerce")
+            df["tof"] = pd.to_numeric(df["tof"], errors="coerce")
+
+            if len(df) == 0:
+                if verbosity >= 1:
+                    print(f"Warning: Pixel DataFrame is empty after processing {os.path.basename(csv_file)}")
+
+            return df
+        except Exception as e:
+            if verbosity >= 1:
+                print(f"Error processing pixel file {csv_file}: {e}")
+            import traceback
+            if verbosity >= 2:
+                traceback.print_exc()
+            return None
+
     def _associate_pair(self, pair, time_norm_ns, spatial_norm_px, dSpace_px, weight_px_in_s, max_time_s, verbosity, method):
         """
         Associate photons to events for a single pair of event and photon DataFrames using the specified method.
@@ -413,6 +558,152 @@ class Analyse:
         else:
             self.associated_df = pd.DataFrame()
             logging.warning("No valid association results to concatenate")
+
+    def associate_full(self, pixel_max_dist_px=5.0, pixel_max_time_ns=500,
+                      photon_time_norm_ns=1.0, photon_spatial_norm_px=1.0, photon_dSpace_px=50.0,
+                      max_time_ns=500, verbosity=1, method='simple'):
+        """
+        Perform full three-tier association: pixels → photons → events.
+
+        This method chains pixel-photon and photon-event associations. If only some data types
+        are loaded, it performs only the relevant associations. The result is stored in
+        self.associated_df as a pixel-centric, photon-centric, or event-centric dataframe
+        depending on what was loaded.
+
+        Args:
+            pixel_max_dist_px (float): Maximum spatial distance in pixels for pixel-photon association.
+            pixel_max_time_ns (float): Maximum time difference in nanoseconds for pixel-photon association.
+            photon_time_norm_ns (float): Time normalization for photon-event association.
+            photon_spatial_norm_px (float): Spatial normalization for photon-event association.
+            photon_dSpace_px (float): Maximum center-of-mass distance for photon-event association.
+            max_time_ns (float): Maximum time window in nanoseconds (used for both associations if method supports it).
+            verbosity (int): Verbosity level (0=silent, 1=summary, 2=debug).
+            method (str): Association method for photon-event association ('simple', 'kdtree', 'window', 'lumacam').
+                         Pixel-photon association always uses simple method.
+
+        Returns:
+            pd.DataFrame: The combined association dataframe (also stored in self.associated_df).
+        """
+        if verbosity >= 1:
+            print("\n" + "="*70)
+            print("Starting Full Multi-Tier Association")
+            print("="*70)
+
+        # Determine what data we have
+        has_pixels = self.pixels_df is not None and len(self.pixels_df) > 0
+        has_photons = self.photons_df is not None and len(self.photons_df) > 0
+        has_events = self.events_df is not None and len(self.events_df) > 0
+
+        if verbosity >= 1:
+            print(f"Data available: Pixels={has_pixels}, Photons={has_photons}, Events={has_events}")
+
+        # Case 1: Pixels → Photons → Events (full 3-tier)
+        if has_pixels and has_photons and has_events:
+            if verbosity >= 1:
+                print("\nPerforming 3-tier association: Pixels → Photons → Events")
+
+            # Step 1: Associate pixels to photons
+            if verbosity >= 1:
+                print("\nStep 1/2: Associating pixels to photons...")
+            pixels_associated = self._associate_pixels_to_photons_simple(
+                self.pixels_df, self.photons_df,
+                max_dist_px=pixel_max_dist_px,
+                max_time_ns=pixel_max_time_ns,
+                verbosity=verbosity
+            )
+
+            # Step 2: Associate photons to events
+            if verbosity >= 1:
+                print("\nStep 2/2: Associating photons to events...")
+            self.associate(
+                time_norm_ns=photon_time_norm_ns,
+                spatial_norm_px=photon_spatial_norm_px,
+                dSpace_px=photon_dSpace_px,
+                max_time_ns=max_time_ns,
+                verbosity=verbosity,
+                method=method
+            )
+
+            # Merge: Add event association info to pixels
+            # Match pixels to photons, then photons to events
+            photons_with_events = self.associated_df.copy()
+
+            # Create a mapping from photon index to event info
+            photons_with_events['photon_idx'] = photons_with_events.index
+
+            # Merge pixels with their photon info (already in pixels_associated)
+            # Then merge with event info from photons
+            event_col = 'assoc_cluster_id' if self.assoc_method == 'lumacam' else 'assoc_event_id'
+
+            # For each pixel, find its associated photon and copy event info
+            pixels_full = pixels_associated.copy()
+            pixels_full['assoc_event_id'] = np.nan
+            pixels_full['assoc_x'] = np.nan
+            pixels_full['assoc_y'] = np.nan
+            pixels_full['assoc_t'] = np.nan
+            pixels_full['assoc_n'] = np.nan
+            pixels_full['assoc_PSD'] = np.nan
+
+            # Match by photon position and time (since we don't have original photon IDs in associated_df)
+            for idx, pixel in pixels_full.iterrows():
+                if not np.isnan(pixel['assoc_photon_id']):
+                    # Find matching photon in photons_with_events
+                    phot_x, phot_y, phot_t = pixel['assoc_phot_x'], pixel['assoc_phot_y'], pixel['assoc_phot_t']
+                    matches = photons_with_events[
+                        (np.abs(photons_with_events['x'] - phot_x) < 0.01) &
+                        (np.abs(photons_with_events['y'] - phot_y) < 0.01) &
+                        (np.abs(photons_with_events['t'] - phot_t) < 1e-9)
+                    ]
+                    if len(matches) > 0:
+                        match = matches.iloc[0]
+                        if not np.isnan(match.get(event_col, np.nan)):
+                            pixels_full.loc[idx, 'assoc_event_id'] = match[event_col]
+                            pixels_full.loc[idx, 'assoc_x'] = match['assoc_x']
+                            pixels_full.loc[idx, 'assoc_y'] = match['assoc_y']
+                            pixels_full.loc[idx, 'assoc_t'] = match['assoc_t']
+                            pixels_full.loc[idx, 'assoc_n'] = match['assoc_n']
+                            pixels_full.loc[idx, 'assoc_PSD'] = match['assoc_PSD']
+
+            self.associated_df = pixels_full
+
+        # Case 2: Pixels → Photons only
+        elif has_pixels and has_photons:
+            if verbosity >= 1:
+                print("\nPerforming 2-tier association: Pixels → Photons")
+            self.associated_df = self._associate_pixels_to_photons_simple(
+                self.pixels_df, self.photons_df,
+                max_dist_px=pixel_max_dist_px,
+                max_time_ns=pixel_max_time_ns,
+                verbosity=verbosity
+            )
+
+        # Case 3: Photons → Events only (standard association)
+        elif has_photons and has_events:
+            if verbosity >= 1:
+                print("\nPerforming standard Photons → Events association")
+            self.associate(
+                time_norm_ns=photon_time_norm_ns,
+                spatial_norm_px=photon_spatial_norm_px,
+                dSpace_px=photon_dSpace_px,
+                max_time_ns=max_time_ns,
+                verbosity=verbosity,
+                method=method
+            )
+
+        else:
+            if verbosity >= 1:
+                print("\nInsufficient data for association. Need at least two data types loaded.")
+            self.associated_df = pd.DataFrame()
+
+        if verbosity >= 1:
+            print("\n" + "="*70)
+            print("Full Association Complete")
+            print("="*70)
+            if len(self.associated_df) > 0:
+                print(f"Final combined dataframe has {len(self.associated_df)} rows")
+                print(f"Columns: {self.associated_df.columns.tolist()}")
+
+        return self.associated_df
 
     def _associate_photons_to_events(self, photons_df, events_df, weight_px_in_s, max_time_s, verbosity):
         """
@@ -849,6 +1140,105 @@ class Analyse:
         photons['assoc_status'] = photons['assoc_status'].astype('category')
         return photons
 
+    def _associate_pixels_to_photons_simple(self, pixels_df, photons_df, max_dist_px=5.0, max_time_ns=500, verbosity=0):
+        """
+        Associate pixels to photons using a simple spatial-temporal proximity method.
+
+        For each photon, finds pixels within a time window and spatial radius, then associates
+        the closest pixels (by spatial distance) to that photon.
+
+        Args:
+            pixels_df (pd.DataFrame): Pixel DataFrame with 'x', 'y', 't', 'tot', 'tof' columns.
+            photons_df (pd.DataFrame): Photon DataFrame with 'x', 'y', 't', 'tof' columns.
+            max_dist_px (float): Maximum spatial distance in pixels for association.
+            max_time_ns (float): Maximum time difference in nanoseconds for association.
+            verbosity (int): Verbosity level (0=silent, 1=summary, 2=debug).
+
+        Returns:
+            pd.DataFrame: Pixel DataFrame with added association columns.
+        """
+        if pixels_df is None or photons_df is None or len(pixels_df) == 0 or len(photons_df) == 0:
+            if verbosity >= 1:
+                print("Warning: Empty pixels or photons dataframe, skipping pixel-photon association")
+            return pixels_df
+
+        pixels = pixels_df.copy()
+        photons = photons_df.copy()
+
+        # Initialize association columns
+        pixels['assoc_photon_id'] = np.nan
+        pixels['assoc_phot_x'] = np.nan
+        pixels['assoc_phot_y'] = np.nan
+        pixels['assoc_phot_t'] = np.nan
+        pixels['pixel_time_diff_ns'] = np.nan
+        pixels['pixel_spatial_diff_px'] = np.nan
+
+        # Ensure sorted by time
+        pixels = pixels.sort_values('t').reset_index(drop=True)
+        photons = photons.sort_values('t').reset_index(drop=True)
+        photons['photon_id'] = photons.index + 1
+
+        # Convert to numpy for fast iteration
+        pix_t = pixels['t'].to_numpy()
+        pix_x = pixels['x'].to_numpy()
+        pix_y = pixels['y'].to_numpy()
+
+        max_time_s = max_time_ns / 1e9
+        left = 0
+        n_pixels_total = len(pixels)
+
+        for _, phot in tqdm(photons.iterrows(), total=len(photons), desc="Associating pixels to photons", disable=(verbosity == 0)):
+            phot_t, phot_x, phot_y, phot_id = phot['t'], phot['x'], phot['y'], phot['photon_id']
+
+            # Slide left to pixels with t >= phot_t - max_time_s
+            while left < n_pixels_total and pix_t[left] < phot_t - max_time_s:
+                left += 1
+
+            # Right to t <= phot_t + max_time_s
+            right = left
+            while right < n_pixels_total and pix_t[right] <= phot_t + max_time_s:
+                right += 1
+
+            if right == left:
+                continue  # No pixels in time window
+
+            # Get pixels in time window
+            sub_idx = np.arange(left, right)
+            sub_x = pix_x[sub_idx]
+            sub_y = pix_y[sub_idx]
+            sub_t = pix_t[sub_idx]
+
+            # Calculate spatial distances
+            spatial_diffs = np.sqrt((sub_x - phot_x)**2 + (sub_y - phot_y)**2)
+
+            # Filter by max distance
+            valid_mask = spatial_diffs <= max_dist_px
+            if not valid_mask.any():
+                continue
+
+            # Get valid pixel indices
+            valid_sub_idx = sub_idx[valid_mask]
+            valid_spatial_diffs = spatial_diffs[valid_mask]
+            valid_time_diffs = (sub_t[valid_mask] - phot_t) * 1e9
+
+            # Associate all valid pixels to this photon
+            for i, pix_idx in enumerate(valid_sub_idx):
+                # Only assign if not already assigned (first match wins)
+                if np.isnan(pixels.loc[pix_idx, 'assoc_photon_id']):
+                    pixels.loc[pix_idx, 'assoc_photon_id'] = phot_id
+                    pixels.loc[pix_idx, 'assoc_phot_x'] = phot_x
+                    pixels.loc[pix_idx, 'assoc_phot_y'] = phot_y
+                    pixels.loc[pix_idx, 'assoc_phot_t'] = phot_t
+                    pixels.loc[pix_idx, 'pixel_time_diff_ns'] = valid_time_diffs[i]
+                    pixels.loc[pix_idx, 'pixel_spatial_diff_px'] = valid_spatial_diffs[i]
+
+        if verbosity >= 1:
+            matched = pixels['assoc_photon_id'].notna().sum()
+            total = len(pixels)
+            print(f"✅ Matched {matched} of {total} pixels to photons ({100 * matched / total:.1f}%)")
+
+        return pixels
+
     def compute_ellipticity(self, x_col='x', y_col='y', event_col=None, verbosity=1):
         """
         Compute ellipticity for associated events using principal component analysis.
@@ -962,3 +1352,51 @@ class Analyse:
             y_col=y_col,
             title=title
         )
+
+    def save_associations(self, output_dir=None, filename="associated_data.csv", format='csv', verbosity=1):
+        """
+        Save associated results to a file.
+
+        Args:
+            output_dir (str, optional): Output directory path. If None, creates 'AssociatedResults' folder in data_folder.
+            filename (str, optional): Output filename (default: 'associated_data.csv').
+            format (str, optional): Output format - 'csv' or 'parquet' (default: 'csv').
+            verbosity (int, optional): Verbosity level (0=silent, 1=info).
+
+        Returns:
+            str: Path to the saved file.
+
+        Raises:
+            ValueError: If no association has been performed yet.
+        """
+        if self.associated_df is None or len(self.associated_df) == 0:
+            raise ValueError("No association data to save. Run associate() or associate_full() first.")
+
+        # Determine output directory
+        if output_dir is None:
+            output_dir = os.path.join(self.data_folder, "AssociatedResults")
+
+        # Create directory if it doesn't exist
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Construct full output path
+        output_path = os.path.join(output_dir, filename)
+
+        # Save based on format
+        if format.lower() == 'csv':
+            self.associated_df.to_csv(output_path, index=False)
+        elif format.lower() == 'parquet':
+            try:
+                self.associated_df.to_parquet(output_path, index=False)
+            except ImportError:
+                raise ImportError("Parquet format requires pyarrow or fastparquet. Install with: pip install pyarrow")
+        else:
+            raise ValueError(f"Unsupported format: {format}. Use 'csv' or 'parquet'.")
+
+        if verbosity >= 1:
+            file_size = os.path.getsize(output_path) / (1024 * 1024)  # Size in MB
+            print(f"✅ Saved {len(self.associated_df)} rows to {output_path}")
+            print(f"   File size: {file_size:.2f} MB")
+            print(f"   Columns: {len(self.associated_df.columns)}")
+
+        return output_path
