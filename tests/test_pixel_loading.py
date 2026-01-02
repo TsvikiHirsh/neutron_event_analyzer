@@ -157,7 +157,12 @@ class TestSaveAssociations:
         # Verify we can read it back
         df_loaded = pd.read_csv(output_path)
         assert len(df_loaded) == len(analyser.associated_df)
-        assert list(df_loaded.columns) == list(analyser.associated_df.columns)
+
+        # Check that columns have been renamed to the new export format
+        assert 'px\\x' in df_loaded.columns, "Should have renamed pixel x column"
+        assert 'px\\y' in df_loaded.columns, "Should have renamed pixel y column"
+        assert 'px\\toa' in df_loaded.columns, "Should have renamed pixel toa column"
+        assert 'ph\\id' in df_loaded.columns, "Should have renamed photon id column"
 
     def test_save_without_association_raises_error(self, temp_data_dir):
         """Test that saving without association raises an error."""

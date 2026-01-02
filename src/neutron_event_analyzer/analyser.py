@@ -1474,6 +1474,72 @@ class Analyse:
             title=title
         )
 
+    def _rename_columns_for_export(self, df):
+        """
+        Rename columns to a clean, user-friendly naming scheme for export.
+
+        Uses prefixes to identify data source:
+        - px\\* for pixel columns
+        - ph\\* for photon columns
+        - ev\\* for event columns
+
+        Args:
+            df (pd.DataFrame): Dataframe with association results.
+
+        Returns:
+            pd.DataFrame: Copy of dataframe with renamed columns.
+        """
+        # Make a copy to avoid modifying the original
+        df_export = df.copy()
+
+        # Determine if this is pixel-centric, photon-centric, or event-centric data
+        # by checking for pixel-specific columns
+        has_pixel_data = 'tot' in df.columns or 'assoc_photon_id' in df.columns
+
+        # Create base mapping for association columns (same for all cases)
+        rename_map = {
+            # Pixel-photon association columns
+            'assoc_photon_id': 'ph\\id',
+            'assoc_phot_x': 'ph\\x',
+            'assoc_phot_y': 'ph\\y',
+            'assoc_phot_t': 'ph\\toa',
+            'pixel_time_diff_ns': 'px\\dt',
+            'pixel_spatial_diff_px': 'px\\dr',
+
+            # Photon-event association columns
+            'assoc_event_id': 'ev\\id',
+            'assoc_cluster_id': 'ev\\id',  # For lumacam method
+            'assoc_x': 'ev\\x',
+            'assoc_y': 'ev\\y',
+            'assoc_t': 'ev\\toa',
+            'assoc_n': 'ev\\n',
+            'assoc_PSD': 'ev\\psd',
+        }
+
+        if has_pixel_data:
+            # Pixel-centric data: x,y,t,tot,tof are pixel columns
+            rename_map.update({
+                'x': 'px\\x',
+                'y': 'px\\y',
+                't': 'px\\toa',
+                'tot': 'px\\tot',
+                'tof': 'px\\tof',
+            })
+        else:
+            # Photon-centric data: x,y,t,tof are photon columns
+            rename_map.update({
+                'x': 'ph\\x',
+                'y': 'ph\\y',
+                't': 'ph\\toa',
+                'tof': 'ph\\tof',
+            })
+
+        # Only rename columns that exist in the dataframe
+        cols_to_rename = {old: new for old, new in rename_map.items() if old in df_export.columns}
+        df_export = df_export.rename(columns=cols_to_rename)
+
+        return df_export
+
     def save_associations(self, output_dir=None, filename="associated_data.csv", format='csv', verbosity=1):
         """
         Save associated results to a file.
@@ -1493,6 +1559,9 @@ class Analyse:
         if self.associated_df is None or len(self.associated_df) == 0:
             raise ValueError("No association data to save. Run associate() or associate_full() first.")
 
+        # Rename columns to user-friendly export format
+        df_to_save = self._rename_columns_for_export(self.associated_df)
+
         # Determine output directory
         if output_dir is None:
             output_dir = os.path.join(self.data_folder, "AssociatedResults")
@@ -1505,10 +1574,10 @@ class Analyse:
 
         # Save based on format
         if format.lower() == 'csv':
-            self.associated_df.to_csv(output_path, index=False)
+            df_to_save.to_csv(output_path, index=False)
         elif format.lower() == 'parquet':
             try:
-                self.associated_df.to_parquet(output_path, index=False)
+                df_to_save.to_parquet(output_path, index=False)
             except ImportError:
                 raise ImportError("Parquet format requires pyarrow or fastparquet. Install with: pip install pyarrow")
         else:
@@ -1516,8 +1585,8 @@ class Analyse:
 
         if verbosity >= 1:
             file_size = os.path.getsize(output_path) / (1024 * 1024)  # Size in MB
-            print(f"✅ Saved {len(self.associated_df)} rows to {output_path}")
+            print(f"✅ Saved {len(df_to_save)} rows to {output_path}")
             print(f"   File size: {file_size:.2f} MB")
-            print(f"   Columns: {len(self.associated_df.columns)}")
+            print(f"   Columns: {len(df_to_save.columns)}")
 
         return output_path
