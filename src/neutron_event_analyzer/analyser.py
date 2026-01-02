@@ -1540,6 +1540,111 @@ class Analyse:
 
         return df_export
 
+    def _create_readme_if_needed(self, output_dir):
+        """
+        Create a README.md file in the output directory explaining the data structure.
+
+        Args:
+            output_dir (str): Directory where the README should be created.
+        """
+        readme_path = os.path.join(output_dir, "README.md")
+
+        # Only create if it doesn't exist
+        if os.path.exists(readme_path):
+            return
+
+        readme_content = """# Associated Results Data Structure
+
+This directory contains neutron event analysis results with pixel-photon-event associations.
+
+## Column Naming Convention
+
+Columns use prefixes to identify the data source:
+- `px\\*` - Pixel data (from Timepix3 detector)
+- `ph\\*` - Photon data (from scintillator)
+- `ev\\*` - Event data (neutron events)
+
+## Column Definitions
+
+### Pixel Columns (px\\*)
+| Column | Description | Units |
+|--------|-------------|-------|
+| `px\\x` | Pixel x-coordinate | pixels |
+| `px\\y` | Pixel y-coordinate | pixels |
+| `px\\toa` | Pixel time of arrival | seconds |
+| `px\\tot` | Pixel time over threshold | seconds |
+| `px\\tof` | Pixel time of flight | seconds |
+| `px\\dt` | Time difference to associated photon | nanoseconds |
+| `px\\dr` | Spatial distance to associated photon | pixels |
+
+### Photon Columns (ph\\*)
+| Column | Description | Units |
+|--------|-------------|-------|
+| `ph\\x` | Photon x-coordinate | pixels |
+| `ph\\y` | Photon y-coordinate | pixels |
+| `ph\\toa` | Photon time of arrival | seconds |
+| `ph\\tof` | Photon time of flight | seconds |
+| `ph\\id` | Associated photon ID | - |
+
+### Event Columns (ev\\*)
+| Column | Description | Units |
+|--------|-------------|-------|
+| `ev\\x` | Event center-of-mass x-coordinate | pixels |
+| `ev\\y` | Event center-of-mass y-coordinate | pixels |
+| `ev\\toa` | Event time of arrival | seconds |
+| `ev\\n` | Number of photons in event | - |
+| `ev\\psd` | Pulse shape discrimination value | - |
+| `ev\\id` | Associated event ID | - |
+
+## Data Structure
+
+Depending on which data types were loaded and associated, the CSV files contain:
+
+### Full 3-Tier Association (Pixels → Photons → Events)
+- One row per pixel
+- Each pixel may be associated with a photon (`ph\\id`)
+- Each photon may be associated with an event (`ev\\id`)
+- Contains all `px\\*`, `ph\\*`, and `ev\\*` columns
+
+### Photon-Event Association Only
+- One row per photon
+- Each photon may be associated with an event (`ev\\id`)
+- Contains `ph\\*` and `ev\\*` columns only
+
+### Pixel-Photon Association Only
+- One row per pixel
+- Each pixel may be associated with a photon (`ph\\id`)
+- Contains `px\\*` and `ph\\*` columns only
+
+## Missing Values
+
+- Unassociated entries have `NaN` (Not a Number) values in association columns
+- For example, pixels without a matched photon will have `NaN` in `ph\\id`, `ph\\x`, `ph\\y`, etc.
+
+## Units Summary
+
+- **Position**: pixels (coordinate system depends on detector configuration)
+- **Time**: seconds (for toa/tof), nanoseconds (for dt)
+- **IDs**: Integer identifiers (0-indexed)
+- **Counts**: Integer values (for ev\\n)
+- **PSD**: Dimensionless discrimination value (typically 0-1)
+
+## Analysis Workflow
+
+The data in this directory was generated using the neutron_event_analyzer package:
+1. Raw detector data (pixels, photons, events) was loaded
+2. Association algorithms matched pixels to photons and photons to events
+3. Results were exported with standardized column names
+
+For more information, see: https://github.com/nuclear/neutron_event_analyzer
+
+---
+*Generated automatically by neutron_event_analyzer*
+"""
+
+        with open(readme_path, 'w') as f:
+            f.write(readme_content)
+
     def save_associations(self, output_dir=None, filename="associated_data.csv", format='csv', verbosity=1):
         """
         Save associated results to a file.
@@ -1568,6 +1673,9 @@ class Analyse:
 
         # Create directory if it doesn't exist
         os.makedirs(output_dir, exist_ok=True)
+
+        # Create README explaining data structure
+        self._create_readme_if_needed(output_dir)
 
         # Construct full output path
         output_path = os.path.join(output_dir, filename)
