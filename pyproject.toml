@@ -22,6 +22,9 @@ dependencies = [
 lumacam = ["lumacamTesting", "yaspin>=2.0.0"]
 dev = ["pytest>=7.0.0", "pytest-cov>=4.0.0"]
 
+[project.scripts]
+nea-assoc = "neutron_event_analyzer.cli:main"
+
 [project.urls]
 "Homepage" = "https://github.com/TsvikiHirsh/neutron_event_analyzer"
 "Repository" = "https://github.com/TsvikiHirsh/neutron_event_analyzer"
