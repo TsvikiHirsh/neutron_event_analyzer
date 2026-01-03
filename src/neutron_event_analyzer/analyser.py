@@ -269,11 +269,25 @@ class Analyse:
 
         # Load pixels if requested
         if pixels:
-            pixel_files = glob.glob(os.path.join(self.data_folder, pixel_glob))
-            pixel_dict = {get_key(f): f for f in pixel_files}
+            # First check for exported CSV files in ExportedPixels
+            exported_pixels_dir = os.path.join(self.data_folder, "ExportedPixels")
+            pixel_files = []
 
-            if verbosity >= 1:
-                print(f"Found {len(pixel_dict)} pixel files.")
+            if os.path.exists(exported_pixels_dir):
+                # Look for CSV files in ExportedPixels
+                csv_files = glob.glob(os.path.join(exported_pixels_dir, "*.csv"))
+                if csv_files:
+                    pixel_files = csv_files
+                    if verbosity >= 1:
+                        print(f"Found {len(pixel_files)} exported pixel CSV files in ExportedPixels/")
+
+            # If no exported CSVs, fall back to looking for .tpx3 files
+            if not pixel_files:
+                pixel_files = glob.glob(os.path.join(self.data_folder, pixel_glob))
+                if verbosity >= 1:
+                    print(f"Found {len(pixel_files)} .tpx3 pixel files.")
+
+            pixel_dict = {get_key(f): f for f in pixel_files}
 
             with tempfile.TemporaryDirectory(dir="/tmp") as tmp_dir:
                 with ProcessPoolExecutor(max_workers=self.n_threads) as executor:

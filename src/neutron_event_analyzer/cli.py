@@ -143,6 +143,13 @@ For more information, visit: https://github.com/nuclear/neutron_event_analyzer
              'If not specified, will auto-detect .parameterSettings.json in data folder.'
     )
     settings_group.add_argument(
+        '--empir-bin-dir',
+        type=str,
+        metavar='DIR',
+        help='Directory containing empir export binaries (empir_export_events, empir_export_photons, empir_pixel2photon). '
+             'Only needed if CSV files are not pre-exported and binaries are not in default location.'
+    )
+    settings_group.add_argument(
         '--threads', '-j',
         type=int,
         default=None,
@@ -290,12 +297,21 @@ def main():
     if verbosity >= 1:
         print(f"\n🔧 Initializing analyzer...")
 
+    # Prepare analyzer kwargs
+    analyser_kwargs = {
+        'data_folder': args.data_folder,
+        'settings': settings,
+        'n_threads': args.threads
+    }
+
+    # Add empir binary directory if specified
+    if args.empir_bin_dir:
+        analyser_kwargs['export_dir'] = args.empir_bin_dir
+        if verbosity >= 1:
+            print(f"   Using empir binaries from: {args.empir_bin_dir}")
+
     try:
-        analyser = Analyse(
-            data_folder=args.data_folder,
-            settings=settings,
-            n_threads=args.threads
-        )
+        analyser = Analyse(**analyser_kwargs)
     except Exception as e:
         print(f"\n❌ Error initializing analyzer: {e}")
         sys.exit(1)
