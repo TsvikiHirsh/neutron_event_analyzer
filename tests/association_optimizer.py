@@ -149,7 +149,7 @@ class AssociationOptimizer:
         # Run association with specified parameters
         analyser.associate_photons_events(
             method=method,
-            photon_dSpace_px=spatial_threshold_px,
+            dSpace_px=spatial_threshold_px,
             max_time_ns=temporal_threshold_ns
         )
 
@@ -210,7 +210,10 @@ class AssociationOptimizer:
 
                 if self.ground_truth_events is not None and associated_mask.sum() > 0:
                     # Map ground truth event_id to event coordinates
-                    event_map = self.ground_truth_events.set_index('event_id')[['center_x', 'center_y']].to_dict('index')
+                    # Check which column names are available
+                    x_col = 'center_x' if 'center_x' in self.ground_truth_events.columns else 'x'
+                    y_col = 'center_y' if 'center_y' in self.ground_truth_events.columns else 'y'
+                    event_map = self.ground_truth_events.set_index('event_id')[[x_col, y_col]].to_dict('index')
 
                     for idx in gt_photons[associated_mask].index:
                         gt_event_id = gt_photons.loc[idx, 'event_id']
@@ -218,8 +221,8 @@ class AssociationOptimizer:
                         result_y = gt_photons.loc[idx, 'result_assoc_y']
 
                         if gt_event_id in event_map:
-                            gt_x = event_map[gt_event_id]['center_x']
-                            gt_y = event_map[gt_event_id]['center_y']
+                            gt_x = event_map[gt_event_id][x_col]
+                            gt_y = event_map[gt_event_id][y_col]
 
                             # Check if associated to correct spatial location
                             distance = np.sqrt((result_x - gt_x)**2 + (result_y - gt_y)**2)

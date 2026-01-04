@@ -6,11 +6,15 @@ find the best association method and parameters for synthetic data.
 """
 
 import os
+import sys
 import tempfile
 from pathlib import Path
 import pytest
 import pandas as pd
 import numpy as np
+
+# Add tests directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent))
 
 from association_optimizer import (
     AssociationOptimizer,
