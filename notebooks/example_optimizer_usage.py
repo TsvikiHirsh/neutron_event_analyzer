@@ -9,10 +9,7 @@ import sys
 from pathlib import Path
 import tempfile
 
-# Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent))
-
-from association_optimizer import AssociationOptimizer, optimize_for_synthetic_data
+from neutron_event_analyzer.optimizer import AssociationOptimizer, optimize_for_synthetic_data
 from test_association_validation import (
     create_synthetic_pixel_data,
     create_synthetic_photon_data,

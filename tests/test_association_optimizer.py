@@ -13,10 +13,7 @@ import pytest
 import pandas as pd
 import numpy as np
 
-# Add tests directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent))
-
-from association_optimizer import (
+from neutron_event_analyzer.optimizer import (
     AssociationOptimizer,
     AssociationMetrics,
     optimize_for_synthetic_data

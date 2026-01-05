@@ -19,7 +19,7 @@ It evaluates each combination by comparing association results to ground truth, 
 ### Basic Grid Search
 
 ```python
-from association_optimizer import optimize_for_synthetic_data
+from neutron_event_analyzer.optimizer import optimize_for_synthetic_data
 
 # Create synthetic data with ground truth
 photon_df = create_synthetic_photon_data(event_configs)  # Has event_id column
@@ -49,7 +49,7 @@ print(f"F1 Score: {best.f1_score:.4f}")
 For fine-tuning existing parameters:
 
 ```python
-from association_optimizer import AssociationOptimizer
+from neutron_event_analyzer.optimizer import AssociationOptimizer
 
 optimizer = AssociationOptimizer(
     synthetic_data_dir=data_dir,
@@ -423,7 +423,7 @@ See `example_optimizer_usage.py` for complete working examples:
 
 Run all examples:
 ```bash
-python tests/example_optimizer_usage.py
+python notebooks/example_optimizer_usage.py
 ```
 
 ## API Reference
@@ -591,7 +591,8 @@ print(f"Test F1: {test_result.f1_score:.4f}")
 
 ## References
 
-- Association algorithms: `src/neutron_event_analyzer/analyser.py`
-- Configuration presets: `src/neutron_event_analyzer/config.py`
-- Synthetic data generation: `tests/test_association_validation.py`
-- Usage examples: `tests/example_optimizer_usage.py`
+- Association algorithms: [src/neutron_event_analyzer/analyser.py](../src/neutron_event_analyzer/analyser.py)
+- Optimizer module: [src/neutron_event_analyzer/optimizer.py](../src/neutron_event_analyzer/optimizer.py)
+- Configuration presets: [src/neutron_event_analyzer/config.py](../src/neutron_event_analyzer/config.py)
+- Synthetic data generation: [tests/test_association_validation.py](../tests/test_association_validation.py)
+- Usage examples: [notebooks/example_optimizer_usage.py](../notebooks/example_optimizer_usage.py)
