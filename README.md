@@ -343,6 +343,141 @@ analyser.associate_full(
 - `photon2event.dSpace_px` → `photon_dSpace_px` (pixels)
 - `photon2event.dTime_s` → `max_time_ns` (seconds → nanoseconds)
 
+## Command-Line Tools (NEW)
+
+The package now includes powerful CLI tools for running associations and optimizing parameters.
+
+### nea-assoc: Run Associations
+
+Process data and perform pixel-photon-event associations from the command line.
+
+```bash
+# Basic usage with auto-detected settings
+nea-assoc /path/to/data
+
+# Use specific settings preset
+nea-assoc /path/to/data --settings in_focus
+
+# Custom association parameters
+nea-assoc /path/to/data --photon-dspace 60 --max-time 500
+
+# Disable specific data types
+nea-assoc /path/to/data --no-pixels -v 2
+```
+
+See [docs/CLI_USAGE.md](docs/CLI_USAGE.md) for complete CLI documentation.
+
+### nea-optimize: Parameter Optimization (NEW)
+
+Automatically find optimal association parameters by analyzing your real data.
+
+#### Iterative Optimization
+
+Run multiple iterations to progressively refine parameters:
+
+```bash
+# Basic usage
+nea-optimize optimize /path/to/data --output results/
+
+# Custom starting point and iterations
+nea-optimize optimize /path/to/data \
+  --spatial 25 \
+  --temporal 150 \
+  --iterations 10 \
+  --output results/
+```
+
+#### Quick Parameter Suggestion
+
+Get instant parameter recommendations:
+
+```bash
+# Analyze data and suggest improvements
+nea-optimize suggest /path/to/data \
+  --spatial 20 \
+  --temporal 100 \
+  --output suggested_params.json
+```
+
+#### Quality Analysis
+
+Analyze association quality without making suggestions:
+
+```bash
+# Get detailed quality metrics
+nea-optimize analyze /path/to/data \
+  --spatial 20 \
+  --temporal 100 \
+  --output metrics.json
+```
+
+**Python API for Optimization:**
+
+```python
+import neutron_event_analyzer as nea
+
+# Iterative optimization
+best_params = nea.optimize_parameters_iteratively(
+    data_folder='/path/to/data',
+    initial_spatial_px=20.0,
+    initial_temporal_ns=100.0,
+    max_iterations=5,
+    output_dir='results/'
+)
+
+print(f"Optimized spatial: {best_params['spatial_px']:.2f} px")
+print(f"Optimized temporal: {best_params['temporal_ns']:.2f} ns")
+
+# Quick suggestion
+suggestion = nea.suggest_parameters_from_data(
+    data_folder='/path/to/data',
+    current_spatial_px=20.0,
+    current_temporal_ns=100.0,
+    output_path='suggested_params.json'
+)
+```
+
+**Output Files:**
+
+- `best_parameters.json`: Optimized parameters in empir format
+- `optimization_history.json`: Full iteration history
+- `summary.json`: Optimization summary with improvements
+
+See [docs/ITERATIVE_OPTIMIZATION.md](docs/ITERATIVE_OPTIMIZATION.md) for complete optimization documentation.
+
+## Parameter Optimization with Ground Truth (NEW)
+
+For synthetic data with known ground truth, use the optimizer to find the best parameters systematically.
+
+```python
+import neutron_event_analyzer as nea
+
+# Grid search optimization
+optimizer = nea.AssociationOptimizer(
+    synthetic_data_dir='path/to/synthetic_data',
+    ground_truth_photons=photon_df,  # With event_id column
+    ground_truth_events=event_df,    # With event_id column
+    verbosity=1
+)
+
+best = optimizer.grid_search(
+    methods=['simple', 'kdtree', 'window'],
+    spatial_thresholds_px=[10.0, 20.0, 50.0],
+    temporal_thresholds_ns=[50.0, 100.0, 500.0],
+    metric='f1_score'
+)
+
+print(f"Best method: {best.method}")
+print(f"Best spatial: {best.spatial_threshold_px} px")
+print(f"Best temporal: {best.temporal_threshold_ns} ns")
+print(f"F1 Score: {best.f1_score:.4f}")
+
+# Save optimized parameters
+optimizer.save_best_parameters('optimized_params.json')
+```
+
+See [docs/OPTIMIZER.md](docs/OPTIMIZER.md) for complete ground-truth optimization documentation.
+
 ## API Reference
 
 ### Analyse Class
