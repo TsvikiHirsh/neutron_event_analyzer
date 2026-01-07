@@ -445,6 +445,111 @@ suggestion = nea.suggest_parameters_from_data(
 
 See [docs/ITERATIVE_OPTIMIZATION.md](docs/ITERATIVE_OPTIMIZATION.md) for complete optimization documentation.
 
+### nea-empir: EMPIR Parameter Optimization (NEW)
+
+**Automatically optimize EMPIR reconstruction parameters using intrinsic distribution analysis - no ground truth needed!**
+
+This tool analyzes the statistical signatures in your reconstructed data to suggest optimal parameters for both pixel-to-photon and photon-to-event clustering.
+
+#### Quick Start
+
+```bash
+# Optimize photon-to-event parameters (most common)
+nea-empir /path/to/data --stage photon2event --output optimized_params.json
+
+# Optimize pixel-to-photon parameters
+nea-empir /path/to/data --stage pixel2photon --output optimized_params.json
+
+# Optimize both stages at once
+nea-empir /path/to/data --stage both --output optimized_params.json
+
+# Use current parameters as baseline
+nea-empir /path/to/data --current-params current_settings.json --output new_params.json
+```
+
+#### How It Works
+
+Instead of requiring ground truth, EMPIR optimization analyzes **intrinsic distribution shapes**:
+
+1. **Temporal clustering**: Analyzes intra-cluster time differences to find optimal time windows
+2. **Spatial clustering**: Analyzes radial spread to find optimal spatial thresholds
+3. **Cluster sizes**: Analyzes size distributions to set appropriate limits
+4. **Event properties**: Analyzes durations and multiplicities to validate parameters
+
+Each parameter leaves a distinctive statistical signature that reveals whether it's too tight (under-clustering) or too loose (over-clustering).
+
+#### Parameters Optimized
+
+**Stage 1: Pixel-to-Photon**
+- `dSpace`: Spatial clustering radius (mm)
+- `dTime`: Temporal clustering window (ns)
+- `nPxMin`: Minimum pixels per photon
+- `nPxMax`: Maximum pixels per photon
+
+**Stage 2: Photon-to-Event**
+- `dSpace_px`: Spatial clustering radius (pixels)
+- `dTime_s`: Temporal clustering window (ns)
+- `durationMax_s`: Maximum event duration (ns)
+
+#### Python API
+
+```python
+import neutron_event_analyzer as nea
+
+# Simple one-liner
+suggestions = nea.optimize_empir_parameters(
+    data_folder='/path/to/data',
+    stage='both',
+    output_path='optimized_params.json'
+)
+
+# Access detailed suggestions
+print(suggestions['photon2event'])
+print(f"Confidence: {suggestions['photon2event'].confidence}")
+print(f"Reasoning: {suggestions['photon2event'].reasoning}")
+
+# Advanced usage with fine control
+analyser = nea.Analyse(data_folder='/path/to/data')
+analyser.load()
+analyser.associate_photons_events()
+
+optimizer = nea.EMPIRParameterOptimizer(analyser, verbosity=1)
+suggestion = optimizer.optimize_photon2event(
+    current_dSpace_px=50.0,
+    current_dTime_s=50e-9,
+    current_durationMax_s=500e-9
+)
+
+print(suggestion)
+params_json = suggestion.get_parameter_json()
+```
+
+#### Example Output
+
+```
+======================================================================
+EMPIR Parameter Suggestions
+======================================================================
+
+PHOTON2EVENT:
+----------------------------------------------------------------------
+  dSpace_px       50.0         → 58.3         ↑ (+16.6%) [high]
+    • High single-photon fraction (32.1%) - parameters too tight
+    • Increasing dSpace by 50% to 58.3 px
+
+  dTime_s         5e-08        → 4.2e-08      ↓ (-16.0%) [high]
+    • Two-component fit: τ_signal=13.8 ns, τ_background=145.2 ns (R²=0.91)
+    • Setting dTime = 3τ_signal = 41.5 ns
+    • Estimated purity at this threshold: 73.2%
+
+  durationMax_s   5e-07        → 4.1e-07      ↓ (-18.0%) [high]
+    • Exponential fit: τ = 82.3 ns (R²=0.89)
+    • Setting durationMax = min(5τ, P99) = 411.5 ns
+======================================================================
+```
+
+See [docs/EMPIR_PARAMETER_OPTIMIZATION.md](docs/EMPIR_PARAMETER_OPTIMIZATION.md) for comprehensive documentation.
+
 ## Parameter Optimization with Ground Truth (NEW)
 
 For synthetic data with known ground truth, use the optimizer to find the best parameters systematically.

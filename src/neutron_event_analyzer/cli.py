@@ -698,10 +698,175 @@ Examples:
     return args.func(args)
 
 
+# =============================================================================
+# nea-empir CLI - EMPIR Parameter Optimization Tool
+# =============================================================================
+
+def main_empir():
+    """Main CLI entry point for nea-empir (EMPIR parameter optimization)."""
+    parser = argparse.ArgumentParser(
+        description='Neutron Event Analyzer - EMPIR Parameter Optimization',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+EMPIR Parameter Optimization Framework
+
+This tool analyzes intrinsic distribution shapes from EMPIR reconstruction
+to suggest optimal parameters WITHOUT requiring ground truth or event association.
+
+Examples:
+  # Optimize photon-to-event parameters
+  nea-empir /path/to/data --stage photon2event
+
+  # Optimize pixel-to-photon parameters
+  nea-empir /path/to/data --stage pixel2photon
+
+  # Optimize both stages
+  nea-empir /path/to/data --stage both --output optimized_params.json
+
+  # Use current parameter values as starting point
+  nea-empir /path/to/data --current-params settings.json --output new_params.json
+
+Available stages:
+  - pixel2photon:  Optimize dSpace, dTime, nPxMin, nPxMax
+  - photon2event:  Optimize dSpace_px, dTime_s, durationMax_s
+  - both:          Optimize all parameters (default)
+
+How it works:
+  This tool analyzes statistical signatures in reconstruction outputs:
+  - Temporal clustering quality from intra-cluster time differences
+  - Spatial clustering quality from cluster spread distributions
+  - Event quality from multiplicity and duration distributions
+
+  Each parameter is optimized independently based on the specific
+  distribution it affects, without requiring ground truth data.
+
+For more information, see the EMPIR Parameter Optimization Framework documentation.
+        """
+    )
+
+    # Positional arguments
+    parser.add_argument(
+        'data_folder',
+        type=str,
+        help='Path to folder containing data (pixels, photons, and/or events)'
+    )
+
+    # Optimization options
+    opt_group = parser.add_argument_group('optimization options')
+    opt_group.add_argument(
+        '--stage', '-s',
+        type=str,
+        choices=['pixel2photon', 'photon2event', 'both'],
+        default='both',
+        help='Which reconstruction stage to optimize (default: both)'
+    )
+    opt_group.add_argument(
+        '--current-params',
+        type=str,
+        metavar='FILE',
+        help='JSON file with current parameter values (for comparison)'
+    )
+
+    # Output options
+    output_group = parser.add_argument_group('output options')
+    output_group.add_argument(
+        '--output', '-o',
+        type=str,
+        metavar='FILE',
+        help='Output file for suggested parameters (JSON format, default: print to console)'
+    )
+
+    # Display options
+    display_group = parser.add_argument_group('display options')
+    display_group.add_argument(
+        '--verbose', '-v',
+        action='count',
+        default=1,
+        help='Increase verbosity (use -vv for more detail)'
+    )
+    display_group.add_argument(
+        '--quiet', '-q',
+        action='store_true',
+        help='Suppress all output except results'
+    )
+    display_group.add_argument(
+        '--version',
+        action='version',
+        version='%(prog)s 1.0.0'
+    )
+
+    args = parser.parse_args()
+
+    # Handle verbosity
+    verbosity = 0 if args.quiet else args.verbose
+
+    # Print banner
+    if verbosity >= 1:
+        print("=" * 70)
+        print("EMPIR Parameter Optimization Framework")
+        print("=" * 70)
+        print(f"\nData folder: {args.data_folder}")
+        print(f"Optimization stage: {args.stage}")
+
+    # Load current parameters if provided
+    current_params = None
+    if args.current_params:
+        try:
+            with open(args.current_params, 'r') as f:
+                current_params = json.load(f)
+            if verbosity >= 1:
+                print(f"Using current parameters from: {args.current_params}")
+        except Exception as e:
+            print(f"⚠️  Warning: Could not load current parameters: {e}")
+            print("    Using default values instead.")
+
+    # Run optimization
+    try:
+        from neutron_event_analyzer.empir_optimizer import optimize_empir_parameters
+
+        results = optimize_empir_parameters(
+            data_folder=args.data_folder,
+            stage=args.stage,
+            current_params=current_params,
+            output_path=args.output,
+            verbosity=verbosity
+        )
+
+        # Display results
+        if verbosity >= 1:
+            for stage_name, suggestion in results.items():
+                print(suggestion)
+
+        if args.output:
+            if verbosity >= 1:
+                print(f"\n✅ Success! Suggested parameters saved to: {args.output}")
+                print("\nNext steps:")
+                print(f"  1. Review the suggestions in {args.output}")
+                print("  2. Use these parameters in your EMPIR reconstruction")
+                print("  3. Re-run analysis to verify improvement")
+        else:
+            if verbosity >= 1:
+                print("\nTip: Use --output FILE to save these suggestions to a JSON file")
+
+    except Exception as e:
+        print(f"\n❌ Error during optimization: {e}")
+        if verbosity >= 2:
+            import traceback
+            traceback.print_exc()
+        sys.exit(1)
+
+    if verbosity >= 1:
+        print("\n" + "=" * 70)
+
+    return 0
+
+
 if __name__ == '__main__':
-    # Support both entry points when run directly
+    # Support all entry points when run directly
     prog_name = os.path.basename(sys.argv[0])
-    if 'optimize' in prog_name:
+    if 'empir' in prog_name:
+        sys.exit(main_empir())
+    elif 'optimize' in prog_name:
         sys.exit(main_optimize())
     else:
         sys.exit(main_assoc())
