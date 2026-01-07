@@ -188,9 +188,11 @@ class ParameterSuggester:
         unassociated_photons = total_photons - associated_photons
         association_rate = associated_photons / total_photons if total_photons > 0 else 0
 
-        # Get events dataframe
-        events_df = self.analyser.get_events_dataframe()
-        total_events = len(events_df) if events_df is not None else 0
+        # Get total events from unique event IDs in combined dataframe
+        if associated_photons > 0:
+            total_events = df[associated_mask]['assoc_event_id'].nunique()
+        else:
+            total_events = 0
 
         # Photons per event
         if associated_photons > 0:
