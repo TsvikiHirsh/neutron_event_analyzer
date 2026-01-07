@@ -41,9 +41,9 @@ class EMPIRRunner:
         binary_paths = {
             'pixel2photon': ['bin/empir_pixel2photon_tpx3spidr', 'empir_pixel2photon_tpx3spidr'],
             'photon2event': ['bin/empir_photon2event', 'empir_photon2event'],
-            'export_photons': ['empir_export_photons'],
-            'export_events': ['empir_export_events'],
-            'export_pixels': ['empir_export_pixelActivations'],
+            'export_photons': ['empir_export_photons', 'empir_export/empir_export_photons'],
+            'export_events': ['empir_export_events', 'empir_export/empir_export_events'],
+            'export_pixels': ['empir_export_pixelActivations', 'empir_export/empir_export_pixelActivations'],
         }
 
         for name, possible_paths in binary_paths.items():

@@ -833,6 +833,10 @@ For more information, see the EMPIR Parameter Optimization Framework documentati
             print(f"⚠️  Warning: Could not load current parameters: {e}")
             print("    Using default values instead.")
 
+    # Set default output path if not specified
+    if not args.output:
+        args.output = os.path.join(args.data_folder, ".suggestedSettingsParameters.json")
+
     # Run optimization
     try:
         from neutron_event_analyzer.empir_optimizer import optimize_empir_parameters
@@ -846,21 +850,39 @@ For more information, see the EMPIR Parameter Optimization Framework documentati
             empir_binaries=empir_binaries
         )
 
-        # Display results
+        # Display results with statistics
         if verbosity >= 1:
             for stage_name, suggestion in results.items():
                 print(suggestion)
 
-        if args.output:
-            if verbosity >= 1:
-                print(f"\n✅ Success! Suggested parameters saved to: {args.output}")
-                print("\nNext steps:")
-                print(f"  1. Review the suggestions in {args.output}")
-                print("  2. Use these parameters in your EMPIR reconstruction")
-                print("  3. Re-run analysis to verify improvement")
-        else:
-            if verbosity >= 1:
-                print("\nTip: Use --output FILE to save these suggestions to a JSON file")
+                # Display diagnostic statistics if available
+                if suggestion.diagnostics:
+                    print(f"\n📊 Diagnostic Statistics for {stage_name}:")
+                    print("─" * 70)
+                    for metric, value in suggestion.diagnostics.items():
+                        if isinstance(value, dict):
+                            # Display nested dict values with indentation
+                            print(f"  {metric}:")
+                            for sub_key, sub_value in value.items():
+                                if isinstance(sub_value, float):
+                                    print(f"    {sub_key:28s}: {sub_value:>12.4g}")
+                                elif isinstance(sub_value, int):
+                                    print(f"    {sub_key:28s}: {sub_value:>12,d}")
+                                else:
+                                    print(f"    {sub_key:28s}: {str(sub_value):>12}")
+                        elif isinstance(value, float):
+                            print(f"  {metric:30s}: {value:>12.4g}")
+                        elif isinstance(value, int):
+                            print(f"  {metric:30s}: {value:>12,d}")
+                        else:
+                            print(f"  {metric:30s}: {str(value):>12}")
+
+        if verbosity >= 1:
+            print(f"\n✅ Suggested parameters saved to: {args.output}")
+            print("\nNext steps:")
+            print(f"  1. Review the suggestions in {args.output}")
+            print("  2. Use these parameters in your EMPIR reconstruction")
+            print("  3. Re-run analysis to verify improvement")
 
     except Exception as e:
         print(f"\n❌ Error during optimization: {e}")
