@@ -11,6 +11,7 @@ photon-to-event reconstruction stages.
 
 import numpy as np
 import pandas as pd
+import subprocess
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any
 import neutron_event_analyzer as nea
@@ -523,7 +524,8 @@ def optimize_empir_parameters(
     stage: str = 'both',  # 'pixel2photon', 'photon2event', or 'both'
     current_params: Optional[Dict[str, Any]] = None,
     output_path: Optional[str] = None,
-    verbosity: int = 1
+    verbosity: int = 1,
+    empir_binaries: Optional[str] = None
 ) -> Dict[str, EMPIRParameterSuggestion]:
     """
     Simple API to optimize EMPIR parameters.
@@ -534,6 +536,7 @@ def optimize_empir_parameters(
         current_params: Current parameter values (optional, will use defaults)
         output_path: Path to save suggested parameters JSON (optional)
         verbosity: Output verbosity level
+        empir_binaries: Path to EMPIR binaries directory (optional, defaults to './export')
 
     Returns:
         Dictionary with suggestions for requested stages
@@ -546,12 +549,134 @@ def optimize_empir_parameters(
         ... )
         >>> print(suggestions['photon2event'])
     """
+    from pathlib import Path
+    from .empir_runner import EMPIRRunner, get_default_params
+
     # Load data
-    analyser = nea.Analyse(data_folder=data_folder)
+    export_dir = empir_binaries if empir_binaries is not None else './export'
+    data_path = Path(data_folder)
+
+    # Check if we need to run EMPIR reconstruction
+    tpx3_dir = data_path / "tpx3Files"
+    photon_dir = data_path / "photonFiles"
+    event_dir = data_path / "eventFiles"
+
+    needs_pixel2photon = False
+    needs_photon2event = False
+
+    # Check what files exist and what we need
+    if tpx3_dir.exists() and list(tpx3_dir.glob("*.tpx3")):
+        # Have TPX3 files
+        if not photon_dir.exists() or not list(photon_dir.glob("*.empirphot")):
+            needs_pixel2photon = True
+            if verbosity >= 1:
+                print("\n" + "="*70)
+                print("Missing photon files - will run pixel2photon reconstruction")
+                print("="*70)
+
+    # Check if we'll need event files (after potentially creating photon files)
+    if stage in ['photon2event', 'both']:
+        # We will need event files - check if they exist
+        if not event_dir.exists() or not list(event_dir.glob("*.empirevent")):
+            # Check if we will have photon files (either existing or about to create)
+            will_have_photons = (photon_dir.exists() and list(photon_dir.glob("*.empirphot"))) or needs_pixel2photon
+            if will_have_photons:
+                needs_photon2event = True
+                if verbosity >= 1:
+                    print("\n" + "="*70)
+                    print("Missing event files - will run photon2event reconstruction")
+                    print("="*70)
+
+    # Run EMPIR reconstruction if needed
+    if needs_pixel2photon or needs_photon2event:
+        runner = EMPIRRunner(empir_binaries_dir=export_dir, verbosity=verbosity)
+
+        # Get or create reconstruction parameters
+        if current_params is None:
+            recon_params = get_default_params()
+        else:
+            recon_params = current_params.copy()
+            # Ensure we have the required structure
+            if 'pixel2photon' not in recon_params:
+                recon_params['pixel2photon'] = get_default_params()['pixel2photon']
+            if 'photon2event' not in recon_params:
+                recon_params['photon2event'] = get_default_params()['photon2event']
+
+        # Run pixel2photon if needed
+        if needs_pixel2photon:
+            photon_dir.mkdir(parents=True, exist_ok=True)
+            success = runner.run_pixel2photon(
+                tpx3_dir=tpx3_dir,
+                output_dir=photon_dir,
+                params=recon_params,
+                n_threads=4
+            )
+            if not success:
+                raise RuntimeError("Failed to run pixel2photon reconstruction")
+
+            # Export photons and pixels to CSV for analyser
+            exported_photons_dir = data_path / "ExportedPhotons"
+            runner.run_export_photons(photon_dir, exported_photons_dir)
+
+            # Export pixels for pixel-photon association
+            try:
+                exported_pixels_dir = data_path / "ExportedPixels"
+                if 'export_pixels' in runner.binaries:
+                    exported_pixels_dir.mkdir(parents=True, exist_ok=True)
+                    for tpx3_file in tpx3_dir.glob("*.tpx3"):
+                        output_file = exported_pixels_dir / f"exported_{tpx3_file.stem}.csv"
+                        cmd = [
+                            str(runner.binaries['export_pixels']),
+                            str(tpx3_file),
+                            str(output_file),
+                            "csv"
+                        ]
+                        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    if verbosity >= 1:
+                        print(f"✓ Exported pixel files to {exported_pixels_dir}")
+            except Exception as e:
+                if verbosity >= 1:
+                    print(f"Warning: Could not export pixels: {e}")
+
+        # Run photon2event if needed
+        if needs_photon2event:
+            event_dir.mkdir(parents=True, exist_ok=True)
+            success = runner.run_photon2event(
+                photon_dir=photon_dir,
+                output_dir=event_dir,
+                params=recon_params,
+                n_threads=4
+            )
+            if not success:
+                raise RuntimeError("Failed to run photon2event reconstruction")
+
+            # Export events to CSV for analyser
+            exported_events_dir = data_path / "ExportedEvents"
+            runner.run_export_events(event_dir, exported_events_dir)
+
+    # Now load the data
+    analyser = nea.Analyse(data_folder=data_folder, export_dir=export_dir)
     analyser.load(verbosity=verbosity)
 
-    # Associate if needed
+    # Associate pixels with photons if needed for pixel2photon optimization
+    # This requires exported pixel files to be available
+    has_exported_pixels = (data_path / "ExportedPixels").exists() and list((data_path / "ExportedPixels").glob("*.csv"))
+
+    if stage in ['pixel2photon', 'both'] and has_exported_pixels:
+        if verbosity >= 1:
+            print("\nAssociating pixels with photons for pixel2photon optimization...")
+        try:
+            analyser.associate(method='simple', verbosity=0)
+        except Exception as e:
+            if verbosity >= 1:
+                print(f"Warning: Pixel-photon association failed: {e}")
+                print("Skipping pixel2photon optimization (requires pixel export binaries)")
+            stage = 'photon2event' if stage == 'both' else None
+
+    # Associate photons with events if needed for photon2event optimization
     if stage in ['photon2event', 'both']:
+        if verbosity >= 1:
+            print("\nAssociating photons with events for photon2event optimization...")
         analyser.associate_photons_events(method='simple', verbosity=0)
 
     # Create optimizer
@@ -564,7 +689,7 @@ def optimize_empir_parameters(
     results = {}
 
     # Optimize requested stages
-    if stage in ['pixel2photon', 'both']:
+    if stage in ['pixel2photon', 'both'] and has_exported_pixels:
         p2p_params = current_params.get('pixel2photon', {})
         results['pixel2photon'] = optimizer.optimize_pixel2photon(
             current_dSpace=p2p_params.get('dSpace', 2.0),
@@ -572,6 +697,10 @@ def optimize_empir_parameters(
             current_nPxMin=p2p_params.get('nPxMin', 8),
             current_nPxMax=p2p_params.get('nPxMax', 100)
         )
+    elif stage in ['pixel2photon', 'both'] and not has_exported_pixels:
+        if verbosity >= 1:
+            print("\n⚠️  Skipping pixel2photon optimization: pixel export binaries not available")
+            print("   To enable: ensure empir_export_pixelActivations is in your EMPIR binaries directory")
 
     if stage in ['photon2event', 'both']:
         p2e_params = current_params.get('photon2event', {})

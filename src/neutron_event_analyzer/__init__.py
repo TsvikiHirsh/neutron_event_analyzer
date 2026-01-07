@@ -5,6 +5,7 @@ from .parameter_suggester import ParameterSuggester, suggest_parameters_from_dat
 from .iterative_optimizer import IterativeOptimizer, optimize_parameters_iteratively
 from .empir_diagnostics import EMPIRDiagnostics, DistributionAnalyzer, EMPIRParameterSuggestion
 from .empir_optimizer import EMPIRParameterOptimizer, optimize_empir_parameters
+from .empir_runner import EMPIRRunner, get_default_params
 
 import warnings
 warnings.filterwarnings("ignore")

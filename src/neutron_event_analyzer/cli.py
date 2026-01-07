@@ -766,6 +766,12 @@ For more information, see the EMPIR Parameter Optimization Framework documentati
         metavar='FILE',
         help='JSON file with current parameter values (for comparison)'
     )
+    opt_group.add_argument(
+        '--empir-binaries',
+        type=str,
+        metavar='DIR',
+        help='Path to directory containing EMPIR binaries (empir_export_events, etc.). Can also be set via EMPIR_PATH environment variable.'
+    )
 
     # Output options
     output_group = parser.add_argument_group('output options')
@@ -800,6 +806,9 @@ For more information, see the EMPIR Parameter Optimization Framework documentati
     # Handle verbosity
     verbosity = 0 if args.quiet else args.verbose
 
+    # Determine EMPIR binaries path: CLI arg > env var > default
+    empir_binaries = args.empir_binaries or os.environ.get('EMPIR_PATH', './export')
+
     # Print banner
     if verbosity >= 1:
         print("=" * 70)
@@ -807,6 +816,10 @@ For more information, see the EMPIR Parameter Optimization Framework documentati
         print("=" * 70)
         print(f"\nData folder: {args.data_folder}")
         print(f"Optimization stage: {args.stage}")
+        if args.empir_binaries:
+            print(f"EMPIR binaries: {empir_binaries}")
+        elif os.environ.get('EMPIR_PATH'):
+            print(f"EMPIR binaries: {empir_binaries} (from EMPIR_PATH)")
 
     # Load current parameters if provided
     current_params = None
@@ -829,7 +842,8 @@ For more information, see the EMPIR Parameter Optimization Framework documentati
             stage=args.stage,
             current_params=current_params,
             output_path=args.output,
-            verbosity=verbosity
+            verbosity=verbosity,
+            empir_binaries=empir_binaries
         )
 
         # Display results
