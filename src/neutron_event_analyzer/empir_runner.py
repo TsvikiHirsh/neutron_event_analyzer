@@ -297,7 +297,7 @@ class EMPIRRunner:
         iterator = tqdm(photon_files, desc="Exporting photons") if self.verbosity >= 1 else photon_files
 
         for photon_file in iterator:
-            output_file = output_dir / f"exported_{photon_file.stem}.csv"
+            output_file = output_dir / f"{photon_file.stem}.csv"
 
             cmd = [
                 str(self.binaries['export_photons']),

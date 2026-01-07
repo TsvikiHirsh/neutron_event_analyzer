@@ -76,7 +76,12 @@ class EMPIRParameterOptimizer:
 
         # Get associated data
         df = self.analyser.get_combined_dataframe()
+        if self.verbosity >= 2:
+            print(f"DEBUG: Combined dataframe has {len(df)} rows")
+            print(f"DEBUG: Columns: {df.columns.tolist()}")
         if df is None or 'assoc_photon_id' not in df.columns:
+            if self.verbosity >= 1:
+                print(f"Available columns: {df.columns.tolist() if df is not None else 'None'}")
             raise ValueError("Need pixel-photon association. Run associate() first.")
 
         # Extract diagnostics
@@ -624,7 +629,7 @@ def optimize_empir_parameters(
                 if 'export_pixels' in runner.binaries:
                     exported_pixels_dir.mkdir(parents=True, exist_ok=True)
                     for tpx3_file in tpx3_dir.glob("*.tpx3"):
-                        output_file = exported_pixels_dir / f"exported_{tpx3_file.stem}.csv"
+                        output_file = exported_pixels_dir / f"{tpx3_file.stem}.csv"
                         cmd = [
                             str(runner.binaries['export_pixels']),
                             str(tpx3_file),
@@ -656,17 +661,46 @@ def optimize_empir_parameters(
 
     # Now load the data
     analyser = nea.Analyse(data_folder=data_folder, export_dir=export_dir)
-    analyser.load(verbosity=verbosity)
 
-    # Associate pixels with photons if needed for pixel2photon optimization
-    # This requires exported pixel files to be available
+    # Check if we have exported pixel files for pixel2photon optimization
     has_exported_pixels = (data_path / "ExportedPixels").exists() and list((data_path / "ExportedPixels").glob("*.csv"))
+
+    # Load data - include pixels if we're doing pixel2photon optimization
+    load_pixels = stage in ['pixel2photon', 'both'] and has_exported_pixels
+    analyser.load(pixels=load_pixels, verbosity=verbosity)
+
+    # Perform association based on what stage we're optimizing
+    pixels_associated_df = None
+    photons_associated_df = None
 
     if stage in ['pixel2photon', 'both'] and has_exported_pixels:
         if verbosity >= 1:
             print("\nAssociating pixels with photons for pixel2photon optimization...")
         try:
-            analyser.associate(method='simple', verbosity=0)
+            analyser.associate(method='simple', verbosity=verbosity)
+            # Save the pixel-centric dataframe for pixel2photon optimization
+            pixels_associated_df = analyser.associated_df.copy()
+
+            # For photon2event optimization, we need the photon-event associations
+            # These are embedded in the pixel dataframe - extract unique photons
+            if stage == 'both' and 'assoc_phot_x' in pixels_associated_df.columns:
+                # Extract photon-level data from pixel associations
+                photon_cols = ['assoc_phot_x', 'assoc_phot_y', 'assoc_phot_t', 'assoc_event_id',
+                               'assoc_x', 'assoc_y', 'assoc_t', 'assoc_n', 'assoc_PSD']
+                available_cols = [col for col in photon_cols if col in pixels_associated_df.columns]
+
+                # Get unique photons (drop duplicates on photon coordinates)
+                photons_with_events = pixels_associated_df[available_cols].copy()
+                photons_with_events = photons_with_events.dropna(subset=['assoc_phot_x', 'assoc_phot_y', 'assoc_phot_t'])
+                photons_with_events = photons_with_events.drop_duplicates(subset=['assoc_phot_x', 'assoc_phot_y', 'assoc_phot_t'])
+
+                # Rename columns to match photon dataframe format
+                photons_with_events = photons_with_events.rename(columns={
+                    'assoc_phot_x': 'x',
+                    'assoc_phot_y': 'y',
+                    'assoc_phot_t': 't'
+                })
+                photons_associated_df = photons_with_events
         except Exception as e:
             if verbosity >= 1:
                 print(f"Warning: Pixel-photon association failed: {e}")
@@ -674,7 +708,9 @@ def optimize_empir_parameters(
             stage = 'photon2event' if stage == 'both' else None
 
     # Associate photons with events if needed for photon2event optimization
-    if stage in ['photon2event', 'both']:
+    # Only run this if we're ONLY doing photon2event (not both)
+    # When doing both, the 3-tier association already did photon-event association
+    if stage == 'photon2event' and not has_exported_pixels:
         if verbosity >= 1:
             print("\nAssociating photons with events for photon2event optimization...")
         analyser.associate_photons_events(method='simple', verbosity=0)
@@ -690,6 +726,10 @@ def optimize_empir_parameters(
 
     # Optimize requested stages
     if stage in ['pixel2photon', 'both'] and has_exported_pixels:
+        # Temporarily restore the pixel-centric dataframe for pixel2photon optimization
+        if pixels_associated_df is not None:
+            analyser.associated_df = pixels_associated_df
+
         p2p_params = current_params.get('pixel2photon', {})
         results['pixel2photon'] = optimizer.optimize_pixel2photon(
             current_dSpace=p2p_params.get('dSpace', 2.0),
@@ -703,6 +743,10 @@ def optimize_empir_parameters(
             print("   To enable: ensure empir_export_pixelActivations is in your EMPIR binaries directory")
 
     if stage in ['photon2event', 'both']:
+        # Restore photon-centric dataframe for photon2event optimization
+        if photons_associated_df is not None:
+            analyser.associated_df = photons_associated_df
+
         p2e_params = current_params.get('photon2event', {})
         results['photon2event'] = optimizer.optimize_photon2event(
             current_dSpace_px=p2e_params.get('dSpace_px', 50.0),
