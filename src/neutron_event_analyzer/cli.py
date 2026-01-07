@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
 """
-Command-line interface for Neutron Event Analyzer (nea-assoc).
+Command-line interface for Neutron Event Analyzer.
 
-This tool performs pixel-photon-event association for neutron detector data.
+This module provides two CLI tools:
+- nea-assoc: For running pixel-photon-event association
+- nea-optimize: For iterative parameter optimization
 """
 
 import argparse
 import sys
 import os
+import json
 from pathlib import Path
-from . import Analyse
-from .config import DEFAULT_PARAMS
 
+
+# =============================================================================
+# nea-assoc CLI - Association Tool
+# =============================================================================
 
 def detect_settings_file(data_folder):
     """
@@ -67,8 +72,10 @@ def validate_data_folder(data_folder):
     return available
 
 
-def create_parser():
+def create_assoc_parser():
     """Create argument parser for nea-assoc CLI."""
+    from .config import DEFAULT_PARAMS
+
     parser = argparse.ArgumentParser(
         prog='nea-assoc',
         description='Neutron Event Analyzer - Associate pixels, photons, and events',
@@ -236,9 +243,12 @@ For more information, visit: https://github.com/nuclear/neutron_event_analyzer
     return parser
 
 
-def main():
+def main_assoc():
     """Main entry point for nea-assoc CLI."""
-    parser = create_parser()
+    from . import Analyse
+    from .config import DEFAULT_PARAMS
+
+    parser = create_assoc_parser()
     args = parser.parse_args()
 
     # Handle quiet mode
@@ -406,5 +416,292 @@ def main():
         print("\n" + "=" * 70)
 
 
+# =============================================================================
+# nea-optimize CLI - Parameter Optimization Tool
+# =============================================================================
+
+def cmd_optimize(args):
+    """Iteratively optimize association parameters on real data."""
+    from neutron_event_analyzer.iterative_optimizer import IterativeOptimizer
+
+    print("Neutron Event Analyzer - Parameter Optimization")
+    print("=" * 70)
+
+    optimizer = IterativeOptimizer(
+        data_folder=args.data_folder,
+        initial_spatial_px=args.spatial,
+        initial_temporal_ns=args.temporal,
+        settings=args.settings,
+        method=args.method,
+        verbosity=args.verbose
+    )
+
+    best_result = optimizer.optimize(
+        max_iterations=args.iterations,
+        convergence_threshold=args.convergence,
+        output_dir=args.output
+    )
+
+    # Print final results
+    print("\n" + "=" * 70)
+    print("FINAL RESULTS")
+    print("=" * 70)
+    print(f"\nBest parameters (iteration {best_result.iteration}):")
+    print(f"  Spatial threshold:  {best_result.spatial_px:.2f} px")
+    print(f"  Temporal threshold: {best_result.temporal_ns:.2f} ns")
+    print(f"\nQuality metrics:")
+    print(f"  Association rate:   {best_result.association_rate:.2%}")
+    print(f"  Events found:       {best_result.total_events}")
+    print(f"  Photons per event:  {best_result.mean_photons_per_event:.1f}")
+
+    if args.output:
+        print(f"\n✓ Results saved to: {args.output}")
+        print(f"  Use: {args.output}/best_parameters.json")
+
+    # Show progress table
+    if args.verbose >= 1:
+        df = optimizer.get_progress_dataframe()
+        print(f"\n\nIteration History:")
+        print("=" * 70)
+        print(f"{'Iter':<6} {'Spatial (px)':<15} {'Temporal (ns)':<15} {'Assoc Rate':<12} {'Events':<8}")
+        print("-" * 70)
+        for _, row in df.iterrows():
+            print(f"{int(row['iteration']):<6} {row['spatial_px']:<15.2f} "
+                  f"{row['temporal_ns']:<15.2f} {row['association_rate']:<12.2%} "
+                  f"{int(row['total_events']):<8}")
+
+    return 0
+
+
+def cmd_suggest(args):
+    """Analyze data and suggest improved parameters."""
+    from neutron_event_analyzer.parameter_suggester import suggest_parameters_from_data
+
+    print("Neutron Event Analyzer - Parameter Suggestion")
+    print("=" * 70)
+
+    suggestion = suggest_parameters_from_data(
+        data_folder=args.data_folder,
+        current_spatial_px=args.spatial,
+        current_temporal_ns=args.temporal,
+        settings=args.settings,
+        method=args.method,
+        output_path=args.output,
+        verbosity=args.verbose
+    )
+
+    if args.output:
+        print(f"\n✓ Suggested parameters saved to: {args.output}")
+
+    return 0
+
+
+def cmd_analyze(args):
+    """Analyze association quality without suggesting changes."""
+    import neutron_event_analyzer as nea
+    from neutron_event_analyzer.parameter_suggester import ParameterSuggester
+
+    print("Neutron Event Analyzer - Association Quality Analysis")
+    print("=" * 70)
+
+    # Load and associate
+    analyser = nea.Analyse(
+        data_folder=args.data_folder,
+        settings=args.settings,
+        n_threads=1
+    )
+    analyser.load(verbosity=0)
+    analyser.associate_photons_events(
+        method=args.method,
+        dSpace_px=args.spatial,
+        max_time_ns=args.temporal
+    )
+
+    # Analyze
+    suggester = ParameterSuggester(analyser, verbosity=args.verbose)
+    metrics = suggester.analyze_quality()
+
+    # Save if requested
+    if args.output:
+        output_path = Path(args.output)
+        with open(output_path, 'w') as f:
+            json.dump(metrics.to_dict(), f, indent=2)
+        print(f"\n✓ Metrics saved to: {output_path}")
+
+    return 0
+
+
+def main_optimize():
+    """Main CLI entry point for nea-optimize."""
+    parser = argparse.ArgumentParser(
+        description='Neutron Event Analyzer - Parameter Optimization Tools',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Optimize parameters iteratively
+  nea-optimize optimize data/ --iterations 5 --output results/
+
+  # Quick parameter suggestion
+  nea-optimize suggest data/ --spatial 20 --temporal 100
+
+  # Analyze current association quality
+  nea-optimize analyze data/ --spatial 20 --temporal 100
+        """
+    )
+
+    subparsers = parser.add_subparsers(dest='command', help='Command to run')
+    subparsers.required = True
+
+    # Optimize command
+    optimize_parser = subparsers.add_parser(
+        'optimize',
+        help='Iteratively optimize parameters on real data'
+    )
+    optimize_parser.add_argument(
+        'data_folder',
+        help='Folder containing photon/event data'
+    )
+    optimize_parser.add_argument(
+        '--spatial', '-s',
+        type=float,
+        default=20.0,
+        help='Initial spatial threshold (pixels, default: 20.0)'
+    )
+    optimize_parser.add_argument(
+        '--temporal', '-t',
+        type=float,
+        default=100.0,
+        help='Initial temporal threshold (nanoseconds, default: 100.0)'
+    )
+    optimize_parser.add_argument(
+        '--iterations', '-n',
+        type=int,
+        default=5,
+        help='Maximum number of iterations (default: 5)'
+    )
+    optimize_parser.add_argument(
+        '--convergence', '-c',
+        type=float,
+        default=0.05,
+        help='Convergence threshold (default: 0.05)'
+    )
+    optimize_parser.add_argument(
+        '--method', '-m',
+        choices=['simple', 'kdtree', 'window', 'lumacam'],
+        default='simple',
+        help='Association method (default: simple)'
+    )
+    optimize_parser.add_argument(
+        '--settings',
+        help='Settings preset or path to settings file'
+    )
+    optimize_parser.add_argument(
+        '--output', '-o',
+        help='Output directory for results'
+    )
+    optimize_parser.add_argument(
+        '--verbose', '-v',
+        action='count',
+        default=1,
+        help='Increase verbosity (use -vv for more detail)'
+    )
+    optimize_parser.set_defaults(func=cmd_optimize)
+
+    # Suggest command
+    suggest_parser = subparsers.add_parser(
+        'suggest',
+        help='Analyze data and suggest improved parameters'
+    )
+    suggest_parser.add_argument(
+        'data_folder',
+        help='Folder containing photon/event data'
+    )
+    suggest_parser.add_argument(
+        '--spatial', '-s',
+        type=float,
+        default=20.0,
+        help='Current spatial threshold (pixels, default: 20.0)'
+    )
+    suggest_parser.add_argument(
+        '--temporal', '-t',
+        type=float,
+        default=100.0,
+        help='Current temporal threshold (nanoseconds, default: 100.0)'
+    )
+    suggest_parser.add_argument(
+        '--method', '-m',
+        choices=['simple', 'kdtree', 'window', 'lumacam'],
+        default='simple',
+        help='Association method (default: simple)'
+    )
+    suggest_parser.add_argument(
+        '--settings',
+        help='Settings preset or path to settings file'
+    )
+    suggest_parser.add_argument(
+        '--output', '-o',
+        help='Output file for suggested parameters (JSON)'
+    )
+    suggest_parser.add_argument(
+        '--verbose', '-v',
+        action='count',
+        default=1,
+        help='Increase verbosity'
+    )
+    suggest_parser.set_defaults(func=cmd_suggest)
+
+    # Analyze command
+    analyze_parser = subparsers.add_parser(
+        'analyze',
+        help='Analyze association quality metrics'
+    )
+    analyze_parser.add_argument(
+        'data_folder',
+        help='Folder containing photon/event data'
+    )
+    analyze_parser.add_argument(
+        '--spatial', '-s',
+        type=float,
+        default=20.0,
+        help='Spatial threshold (pixels, default: 20.0)'
+    )
+    analyze_parser.add_argument(
+        '--temporal', '-t',
+        type=float,
+        default=100.0,
+        help='Temporal threshold (nanoseconds, default: 100.0)'
+    )
+    analyze_parser.add_argument(
+        '--method', '-m',
+        choices=['simple', 'kdtree', 'window', 'lumacam'],
+        default='simple',
+        help='Association method (default: simple)'
+    )
+    analyze_parser.add_argument(
+        '--settings',
+        help='Settings preset or path to settings file'
+    )
+    analyze_parser.add_argument(
+        '--output', '-o',
+        help='Output file for metrics (JSON)'
+    )
+    analyze_parser.add_argument(
+        '--verbose', '-v',
+        action='count',
+        default=1,
+        help='Increase verbosity'
+    )
+    analyze_parser.set_defaults(func=cmd_analyze)
+
+    # Parse and execute
+    args = parser.parse_args()
+    return args.func(args)
+
+
 if __name__ == '__main__':
-    main()
+    # Support both entry points when run directly
+    prog_name = os.path.basename(sys.argv[0])
+    if 'optimize' in prog_name:
+        sys.exit(main_optimize())
+    else:
+        sys.exit(main_assoc())
