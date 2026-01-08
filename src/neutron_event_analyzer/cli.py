@@ -105,9 +105,9 @@ For more information, visit: https://github.com/nuclear/neutron_event_analyzer
 
     # Positional arguments
     parser.add_argument(
-        'data_folder',
+        'data',
         type=str,
-        help='Path to data folder containing eventFiles, photonFiles, and/or tpx3Files'
+        help='Path to data folder'
     )
 
     # Data loading options
@@ -150,11 +150,10 @@ For more information, visit: https://github.com/nuclear/neutron_event_analyzer
              'If not specified, will auto-detect .parameterSettings.json in data folder.'
     )
     settings_group.add_argument(
-        '--empir-bin-dir',
+        '--binaries',
         type=str,
         metavar='DIR',
-        help='Directory containing empir export binaries (empir_export_events, empir_export_photons, empir_pixel2photon). '
-             'Only needed if CSV files are not pre-exported and binaries are not in default location.'
+        help='EMPIR binaries directory (default: $EMPIR_PATH or ./export)'
     )
     settings_group.add_argument(
         '--threads', '-j',
@@ -265,9 +264,9 @@ def main_assoc():
 
     # Validate data folder
     if verbosity >= 1:
-        print(f"\n📁 Data folder: {args.data_folder}")
+        print(f"\n📁 Data folder: {args.data}")
 
-    available_data = validate_data_folder(args.data_folder)
+    available_data = validate_data_folder(args.data)
 
     if verbosity >= 1:
         print(f"\n📊 Available data types:")
@@ -288,7 +287,7 @@ def main_assoc():
     settings = args.settings
     if settings is None:
         # Try to auto-detect settings file
-        detected_settings = detect_settings_file(args.data_folder)
+        detected_settings = detect_settings_file(args.data)
         if detected_settings:
             settings = detected_settings
             if verbosity >= 1:
@@ -309,16 +308,20 @@ def main_assoc():
 
     # Prepare analyzer kwargs
     analyser_kwargs = {
-        'data_folder': args.data_folder,
+        'data_folder': args.data,
         'settings': settings,
         'n_threads': args.threads
     }
 
-    # Add empir binary directory if specified
-    if args.empir_bin_dir:
-        analyser_kwargs['export_dir'] = args.empir_bin_dir
+    # Add empir binary directory if specified (use EMPIR_PATH as fallback)
+    binaries = args.binaries or os.environ.get('EMPIR_PATH')
+    if binaries:
+        analyser_kwargs['export_dir'] = binaries
         if verbosity >= 1:
-            print(f"   Using empir binaries from: {args.empir_bin_dir}")
+            if args.binaries:
+                print(f"   Using empir binaries from: {binaries}")
+            else:
+                print(f"   Using empir binaries from: {binaries} (from $EMPIR_PATH)")
 
     try:
         analyser = Analyse(**analyser_kwargs)
@@ -702,100 +705,75 @@ Examples:
 # nea-empir CLI - EMPIR Parameter Optimization Tool
 # =============================================================================
 
-def main_empir():
-    """Main CLI entry point for nea-empir (EMPIR parameter optimization)."""
+def main_suggest():
+    """Main CLI entry point for nea-suggest (EMPIR parameter optimization)."""
     parser = argparse.ArgumentParser(
-        description='Neutron Event Analyzer - EMPIR Parameter Optimization',
+        description='Suggest optimal EMPIR reconstruction parameters',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-EMPIR Parameter Optimization Framework
-
-This tool analyzes intrinsic distribution shapes from EMPIR reconstruction
-to suggest optimal parameters WITHOUT requiring ground truth or event association.
-
 Examples:
-  # Optimize photon-to-event parameters
-  nea-empir /path/to/data --stage photon2event
+  # Basic usage (optimizes both pixel2photon and photon2event)
+  export EMPIR_PATH=/path/to/empir/binaries
+  nea-suggest /path/to/data
 
-  # Optimize pixel-to-photon parameters
-  nea-empir /path/to/data --stage pixel2photon
+  # Optimize only photon-to-event parameters
+  nea-suggest /path/to/data --stage photon2event
 
-  # Optimize both stages
-  nea-empir /path/to/data --stage both --output optimized_params.json
+  # Optimize only pixel-to-photon parameters
+  nea-suggest /path/to/data --stage pixel2photon
 
-  # Use current parameter values as starting point
-  nea-empir /path/to/data --current-params settings.json --output new_params.json
+  # Use current parameters as baseline and save to custom location
+  nea-suggest /path/to/data --params settings.json --output new_params.json
 
-Available stages:
-  - pixel2photon:  Optimize dSpace, dTime, nPxMin, nPxMax
-  - photon2event:  Optimize dSpace_px, dTime_s, durationMax_s
-  - both:          Optimize all parameters (default)
-
-How it works:
-  This tool analyzes statistical signatures in reconstruction outputs:
-  - Temporal clustering quality from intra-cluster time differences
-  - Spatial clustering quality from cluster spread distributions
-  - Event quality from multiplicity and duration distributions
-
-  Each parameter is optimized independently based on the specific
-  distribution it affects, without requiring ground truth data.
-
-For more information, see the EMPIR Parameter Optimization Framework documentation.
+For more information: https://neutron-event-analyzer.readthedocs.io
         """
     )
 
-    # Positional arguments
+    # Required argument
     parser.add_argument(
-        'data_folder',
+        'data',
         type=str,
-        help='Path to folder containing data (pixels, photons, and/or events)'
+        help='Path to data folder'
     )
 
-    # Optimization options
-    opt_group = parser.add_argument_group('optimization options')
-    opt_group.add_argument(
+    # Main options
+    parser.add_argument(
         '--stage', '-s',
         type=str,
         choices=['pixel2photon', 'photon2event', 'both'],
         default='both',
-        help='Which reconstruction stage to optimize (default: both)'
+        help='Reconstruction stage to optimize (default: both)'
     )
-    opt_group.add_argument(
-        '--current-params',
+    parser.add_argument(
+        '--params',
         type=str,
         metavar='FILE',
-        help='JSON file with current parameter values (for comparison)'
+        help='Current parameters JSON file for comparison'
     )
-    opt_group.add_argument(
-        '--empir-binaries',
-        type=str,
-        metavar='DIR',
-        help='Path to directory containing EMPIR binaries (empir_export_events, etc.). Can also be set via EMPIR_PATH environment variable.'
-    )
-
-    # Output options
-    output_group = parser.add_argument_group('output options')
-    output_group.add_argument(
+    parser.add_argument(
         '--output', '-o',
         type=str,
         metavar='FILE',
-        help='Output file for suggested parameters (JSON format, default: print to console)'
+        help='Output file for suggestions (default: DATA/.suggestedSettingsParameters.json)'
     )
-
-    # Display options
-    display_group = parser.add_argument_group('display options')
-    display_group.add_argument(
+    parser.add_argument(
+        '--binaries',
+        type=str,
+        metavar='DIR',
+        help='EMPIR binaries directory (default: $EMPIR_PATH or ./export)'
+    )
+    parser.add_argument(
         '--verbose', '-v',
         action='count',
         default=1,
-        help='Increase verbosity (use -vv for more detail)'
+        help='Increase verbosity (-vv for debug)'
     )
-    display_group.add_argument(
+    parser.add_argument(
         '--quiet', '-q',
         action='store_true',
-        help='Suppress all output except results'
+        help='Minimal output'
     )
-    display_group.add_argument(
+    parser.add_argument(
         '--version',
         action='version',
         version='%(prog)s 1.0.0'
@@ -807,42 +785,42 @@ For more information, see the EMPIR Parameter Optimization Framework documentati
     verbosity = 0 if args.quiet else args.verbose
 
     # Determine EMPIR binaries path: CLI arg > env var > default
-    empir_binaries = args.empir_binaries or os.environ.get('EMPIR_PATH', './export')
+    empir_binaries = args.binaries or os.environ.get('EMPIR_PATH', './export')
 
     # Print banner
     if verbosity >= 1:
         print("=" * 70)
-        print("EMPIR Parameter Optimization Framework")
+        print("EMPIR Parameter Suggestions")
         print("=" * 70)
-        print(f"\nData folder: {args.data_folder}")
-        print(f"Optimization stage: {args.stage}")
-        if args.empir_binaries:
+        print(f"\nData folder: {args.data}")
+        print(f"Stage: {args.stage}")
+        if args.binaries:
             print(f"EMPIR binaries: {empir_binaries}")
         elif os.environ.get('EMPIR_PATH'):
-            print(f"EMPIR binaries: {empir_binaries} (from EMPIR_PATH)")
+            print(f"EMPIR binaries: {empir_binaries} (from $EMPIR_PATH)")
 
     # Load current parameters if provided
     current_params = None
-    if args.current_params:
+    if args.params:
         try:
-            with open(args.current_params, 'r') as f:
+            with open(args.params, 'r') as f:
                 current_params = json.load(f)
             if verbosity >= 1:
-                print(f"Using current parameters from: {args.current_params}")
+                print(f"Current parameters: {args.params}")
         except Exception as e:
-            print(f"⚠️  Warning: Could not load current parameters: {e}")
-            print("    Using default values instead.")
+            print(f"⚠️  Warning: Could not load parameters: {e}")
+            print("    Using defaults instead.")
 
     # Set default output path if not specified
     if not args.output:
-        args.output = os.path.join(args.data_folder, ".suggestedSettingsParameters.json")
+        args.output = os.path.join(args.data, ".suggestedSettingsParameters.json")
 
     # Run optimization
     try:
         from neutron_event_analyzer.empir_optimizer import optimize_empir_parameters
 
         results = optimize_empir_parameters(
-            data_folder=args.data_folder,
+            data_folder=args.data,
             stage=args.stage,
             current_params=current_params,
             output_path=args.output,
@@ -898,11 +876,4 @@ For more information, see the EMPIR Parameter Optimization Framework documentati
 
 
 if __name__ == '__main__':
-    # Support all entry points when run directly
-    prog_name = os.path.basename(sys.argv[0])
-    if 'empir' in prog_name:
-        sys.exit(main_empir())
-    elif 'optimize' in prog_name:
-        sys.exit(main_optimize())
-    else:
-        sys.exit(main_assoc())
+    sys.exit(main_suggest())

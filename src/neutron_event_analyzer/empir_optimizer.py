@@ -708,9 +708,8 @@ def optimize_empir_parameters(
             stage = 'photon2event' if stage == 'both' else None
 
     # Associate photons with events if needed for photon2event optimization
-    # Only run this if we're ONLY doing photon2event (not both)
-    # When doing both, the 3-tier association already did photon-event association
-    if stage == 'photon2event' and not has_exported_pixels:
+    # Skip this if we already did 3-tier association (when optimizing pixel2photon or both with pixels)
+    if stage == 'photon2event' and pixels_associated_df is None:
         if verbosity >= 1:
             print("\nAssociating photons with events for photon2event optimization...")
         analyser.associate_photons_events(method='simple', verbosity=0)

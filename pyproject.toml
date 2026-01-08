@@ -27,6 +27,5 @@ dev = ["pytest>=7.0.0", "pytest-cov>=4.0.0"]
 "Repository" = "https://github.com/TsvikiHirsh/neutron_event_analyzer"
 
 [project.scripts]
+nea-suggest = "neutron_event_analyzer.cli:main_suggest"
 nea-assoc = "neutron_event_analyzer.cli:main_assoc"
-nea-optimize = "neutron_event_analyzer.cli:main_optimize"
-nea-empir = "neutron_event_analyzer.cli:main_empir"
