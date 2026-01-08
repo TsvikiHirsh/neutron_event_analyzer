@@ -719,11 +719,13 @@ Examples:
   # Optimize only photon-to-event parameters
   nea-suggest /path/to/data --stage photon2event
 
-  # Optimize only pixel-to-photon parameters
-  nea-suggest /path/to/data --stage pixel2photon
+  # Use parameter preset as baseline
+  nea-suggest /path/to/data --params fast_neutrons
 
-  # Use current parameters as baseline and save to custom location
-  nea-suggest /path/to/data --params settings.json --output new_params.json
+  # Use custom parameters file as baseline
+  nea-suggest /path/to/data --params my_params.json --output new_params.json
+
+Available parameter presets: in_focus, out_of_focus, fast_neutrons, hitmap
 
 For more information: https://neutron-event-analyzer.readthedocs.io
         """
@@ -747,8 +749,8 @@ For more information: https://neutron-event-analyzer.readthedocs.io
     parser.add_argument(
         '--params',
         type=str,
-        metavar='FILE',
-        help='Current parameters JSON file for comparison'
+        metavar='PRESET|FILE',
+        help='Parameter preset name (in_focus, out_of_focus, fast_neutrons, hitmap) or JSON file path'
     )
     parser.add_argument(
         '--output', '-o',
@@ -802,14 +804,24 @@ For more information: https://neutron-event-analyzer.readthedocs.io
     # Load current parameters if provided
     current_params = None
     if args.params:
-        try:
-            with open(args.params, 'r') as f:
-                current_params = json.load(f)
+        # First check if it's a preset name
+        from neutron_event_analyzer.config import DEFAULT_PARAMS
+        if args.params in DEFAULT_PARAMS:
+            current_params = DEFAULT_PARAMS[args.params]
             if verbosity >= 1:
-                print(f"Current parameters: {args.params}")
-        except Exception as e:
-            print(f"⚠️  Warning: Could not load parameters: {e}")
-            print("    Using defaults instead.")
+                print(f"Current parameters: '{args.params}' preset")
+        else:
+            # Try to load as a file
+            try:
+                with open(args.params, 'r') as f:
+                    current_params = json.load(f)
+                if verbosity >= 1:
+                    print(f"Current parameters: {args.params}")
+            except Exception as e:
+                print(f"⚠️  Warning: Could not load parameters from '{args.params}'")
+                print(f"    Not a valid preset name or file path.")
+                print(f"    Available presets: {', '.join(DEFAULT_PARAMS.keys())}")
+                print("    Using defaults instead.")
 
     # Set default output path if not specified
     if not args.output:
