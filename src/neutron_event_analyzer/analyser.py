@@ -24,9 +24,10 @@ logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 class Analyse:
-    def __init__(self, data_folder, export_dir="./export", n_threads=10, use_lumacam=False, settings=None):
+    def __init__(self, data_folder, export_dir="./export", n_threads=10, use_lumacam=False, settings=None,
+                 verbosity=1, events=True, photons=True, pixels=True, limit=None, query=None):
         """
-        Initialize the Analyse object.
+        Initialize the Analyse object and automatically load data.
 
         This class provides tools for loading, associating, and analyzing neutron event and photon data
         from paired files. It supports multiple association methods:
@@ -49,13 +50,21 @@ class Analyse:
             use_lumacam (bool): If True, prefer 'lumacam' for association when method='auto' (if available).
             settings (str or dict, optional): Path to settings JSON file or settings dictionary containing empir parameters.
                                              These parameters will be used as defaults for association methods.
+            verbosity (int): Verbosity level (0=silent, 1=progress bars only, 2=detailed output). Default is 1.
+            events (bool): Whether to load events (default: True).
+            photons (bool): Whether to load photons (default: True).
+            pixels (bool): Whether to load pixels (default: True).
+            limit (int, optional): If provided, limit the number of rows loaded for all data types.
+            query (str, optional): If provided, apply a pandas query string to filter the events dataframe.
         """
         self.data_folder = data_folder
         self.export_dir = export_dir
         self.n_threads = n_threads
         self.use_lumacam = use_lumacam and LUMACAM_AVAILABLE
+        self.verbosity = verbosity
         if use_lumacam and not LUMACAM_AVAILABLE:
-            print("Warning: lumacamTesting not installed. Cannot use lumacam association.")
+            if verbosity >= 2:
+                print("Warning: lumacamTesting not installed. Cannot use lumacam association.")
             self.use_lumacam = False
         self.pair_files = None
         self.pair_dfs = None
@@ -72,6 +81,13 @@ class Analyse:
         # Load settings
         self.settings = self._load_settings(settings)
         self.settings_source = self._get_settings_source(settings)
+
+        # Show settings info if verbosity >= 2
+        if verbosity >= 2 and self.settings:
+            print(f"⚙️  Using settings: {self.settings_source}")
+
+        # Auto-load data
+        self.load(events=events, photons=photons, pixels=pixels, limit=limit, query=query, verbosity=verbosity)
 
     def _load_settings(self, settings):
         """
@@ -239,10 +255,6 @@ class Analyse:
         else:
             logger.setLevel(logging.WARNING)
 
-        # Print settings info if verbosity >= 1 (matches CLI behavior)
-        if verbosity >= 1 and self.settings:
-            print(f"⚙️  Using settings: {self.settings_source}")
-
         def get_key(f):
             return os.path.basename(f).rsplit('.', 1)[0]
 
@@ -257,13 +269,16 @@ class Analyse:
             if events and photons:
                 common_keys = sorted(set(event_dict) & set(photon_dict))
                 self.pair_files = [(event_dict[k], photon_dict[k]) for k in common_keys]
-                print(f"Found {len(self.pair_files)} paired event-photon files.")
+                if verbosity >= 2:
+                    print(f"Found {len(self.pair_files)} paired event-photon files.")
             elif events:
                 self.pair_files = [(event_dict[k], None) for k in sorted(event_dict.keys())]
-                print(f"Found {len(self.pair_files)} event files.")
+                if verbosity >= 2:
+                    print(f"Found {len(self.pair_files)} event files.")
             else:  # photons only
                 self.pair_files = [(None, photon_dict[k]) for k in sorted(photon_dict.keys())]
-                print(f"Found {len(self.pair_files)} photon files.")
+                if verbosity >= 2:
+                    print(f"Found {len(self.pair_files)} photon files.")
 
             with tempfile.TemporaryDirectory(dir="/tmp") as tmp_dir:
                 with ProcessPoolExecutor(max_workers=self.n_threads) as executor:
@@ -289,7 +304,8 @@ class Analyse:
             if query is not None and events and len(self.events_df) > 0:
                 original_events_len = len(self.events_df)
                 self.events_df = self.events_df.query(query)
-                print(f"Applied query '{query}': {original_events_len} -> {len(self.events_df)} events")
+                if verbosity >= 2:
+                    print(f"Applied query '{query}': {original_events_len} -> {len(self.events_df)} events")
 
             # Apply limit if provided
             if limit is not None:
@@ -297,13 +313,15 @@ class Analyse:
                     self.events_df = self.events_df.head(limit)
                 if photons and len(self.photons_df) > 0:
                     self.photons_df = self.photons_df.head(limit)
-                print(f"Applied limit of {limit} rows.")
+                if verbosity >= 2:
+                    print(f"Applied limit of {limit} rows.")
 
             # Update pair_dfs to reflect the filtered data for association
             if query is not None or limit is not None:
                 if events and photons:
                     self.pair_dfs = [(self.events_df, self.photons_df)]
-                    print(f"Updated pair_dfs with filtered data for association.")
+                    if verbosity >= 2:
+                        print(f"Updated pair_dfs with filtered data for association.")
 
             if events or photons:
                 status_parts = []
@@ -311,7 +329,8 @@ class Analyse:
                     status_parts.append(f"{len(self.events_df)} events")
                 if load_photons:
                     status_parts.append(f"{len(self.photons_df)} photons")
-                print(f"Loaded {' and '.join(status_parts)} in total.")
+                if verbosity >= 2:
+                    print(f"Loaded {' and '.join(status_parts)} in total.")
 
         # Load pixels if requested
         if pixels:
@@ -324,13 +343,13 @@ class Analyse:
                 csv_files = glob.glob(os.path.join(exported_pixels_dir, "*.csv"))
                 if csv_files:
                     pixel_files = csv_files
-                    if verbosity >= 1:
+                    if verbosity >= 2:
                         print(f"Found {len(pixel_files)} exported pixel CSV files in ExportedPixels/")
 
             # If no exported CSVs, fall back to looking for .tpx3 files
             if not pixel_files:
                 pixel_files = glob.glob(os.path.join(self.data_folder, pixel_glob))
-                if verbosity >= 1:
+                if verbosity >= 2:
                     print(f"Found {len(pixel_files)} .tpx3 pixel files.")
 
             pixel_dict = {get_key(f): f for f in pixel_files}
@@ -715,7 +734,7 @@ class Analyse:
 
     def associate(self, pixel_max_dist_px=None, pixel_max_time_ns=None,
                   photon_time_norm_ns=1.0, photon_spatial_norm_px=1.0, photon_dSpace_px=None,
-                  max_time_ns=None, verbosity=1, method='simple'):
+                  max_time_ns=None, verbosity=None, method='simple'):
         """
         Perform full three-tier association: pixels → photons → events.
 
@@ -735,13 +754,18 @@ class Analyse:
                                                 If None, uses value from settings or defaults to 50.0.
             max_time_ns (float, optional): Maximum time window in nanoseconds (used for both associations if method supports it).
                                            If None, uses value from settings or defaults to 500.
-            verbosity (int): Verbosity level (0=silent, 1=summary, 2=debug).
+            verbosity (int, optional): Verbosity level (0=silent, 1=progress bars only, 2=detailed output).
+                                      If None, uses instance verbosity level set in __init__.
             method (str): Association method for photon-event association ('simple', 'kdtree', 'window', 'lumacam').
                          Pixel-photon association always uses simple method.
 
         Returns:
             pd.DataFrame: The combined association dataframe (also stored in self.associated_df).
         """
+        # Use instance verbosity if not specified
+        if verbosity is None:
+            verbosity = self.verbosity
+
         # Get defaults from settings
         defaults = self._get_association_defaults()
 
@@ -755,7 +779,7 @@ class Analyse:
         if max_time_ns is None:
             max_time_ns = defaults.get('max_time_ns', 500)
 
-        if verbosity >= 1:
+        if verbosity >= 2:
             print("\n" + "="*70)
             print("Starting Full Multi-Tier Association")
             print("="*70)
@@ -772,16 +796,16 @@ class Analyse:
         has_photons = self.photons_df is not None and len(self.photons_df) > 0
         has_events = self.events_df is not None and len(self.events_df) > 0
 
-        if verbosity >= 1:
+        if verbosity >= 2:
             print(f"Data available: Pixels={has_pixels}, Photons={has_photons}, Events={has_events}")
 
         # Case 1: Pixels → Photons → Events (full 3-tier)
         if has_pixels and has_photons and has_events:
-            if verbosity >= 1:
+            if verbosity >= 2:
                 print("\nPerforming 3-tier association: Pixels → Photons → Events")
 
             # Step 1: Associate pixels to photons
-            if verbosity >= 1:
+            if verbosity >= 2:
                 print("\nStep 1/2: Associating pixels to photons...")
             pixels_associated = self._associate_pixels_to_photons_simple(
                 self.pixels_df, self.photons_df,
@@ -791,7 +815,7 @@ class Analyse:
             )
 
             # Step 2: Associate photons to events
-            if verbosity >= 1:
+            if verbosity >= 2:
                 print("\nStep 2/2: Associating photons to events...")
             self.associate_photons_events(
                 time_norm_ns=photon_time_norm_ns,
@@ -803,7 +827,7 @@ class Analyse:
             )
 
             # Step 3: Merge event information into pixel dataframe
-            if verbosity >= 1:
+            if verbosity >= 2:
                 print("\nStep 3/3: Merging pixel-photon-event associations...")
 
             # Merge: Add event association info to pixels
@@ -843,13 +867,13 @@ class Analyse:
 
             self.associated_df = pixels_full
 
-            if verbosity >= 1:
+            if verbosity >= 2:
                 n_pixels_with_events = pixels_full['assoc_event_id'].notna().sum()
                 print(f"✅ {n_pixels_with_events} pixels associated through full chain to events")
 
         # Case 2: Pixels → Photons only
         elif has_pixels and has_photons:
-            if verbosity >= 1:
+            if verbosity >= 2:
                 print("\nPerforming 2-tier association: Pixels → Photons")
             self.associated_df = self._associate_pixels_to_photons_simple(
                 self.pixels_df, self.photons_df,
@@ -860,7 +884,7 @@ class Analyse:
 
         # Case 3: Photons → Events only (standard association)
         elif has_photons and has_events:
-            if verbosity >= 1:
+            if verbosity >= 2:
                 print("\nPerforming standard Photons → Events association")
             self.associate_photons_events(
                 time_norm_ns=photon_time_norm_ns,
@@ -872,11 +896,11 @@ class Analyse:
             )
 
         else:
-            if verbosity >= 1:
+            if verbosity >= 2:
                 print("\nInsufficient data for association. Need at least two data types loaded.")
             self.associated_df = pd.DataFrame()
 
-        if verbosity >= 1:
+        if verbosity >= 2:
             print("\n" + "="*70)
             print("Full Association Complete")
             print("="*70)
