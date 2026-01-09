@@ -190,11 +190,16 @@ For more information, visit: https://github.com/nuclear/neutron_event_analyzer
         help='Maximum time window for associations (nanoseconds)'
     )
     assoc_group.add_argument(
-        '--method',
+        '--method', '-m',
         type=str,
-        choices=['simple', 'kdtree', 'window', 'auto'],
+        choices=['simple', 'kdtree', 'window', 'lumacam', 'auto'],
         default='simple',
-        help='Association method for photon-event association (default: simple)'
+        help='Association method for photon-event association. '
+             'simple: Fast forward time-window with CoM check (default). '
+             'kdtree: Full KDTree on normalized space-time. '
+             'window: Time-window KDTree for sorted data. '
+             'lumacam: Uses lumacamTesting library (if installed). '
+             'auto: Automatically choose based on data size.'
     )
     assoc_group.add_argument(
         '--relax',
