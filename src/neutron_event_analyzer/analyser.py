@@ -65,8 +65,13 @@ class Analyse:
         self.associated_df = None
         self.assoc_method = None
 
+        # Auto-detect settings if not provided
+        if settings is None:
+            settings = self._detect_settings_file()
+
         # Load settings
         self.settings = self._load_settings(settings)
+        self.settings_source = self._get_settings_source(settings)
 
     def _load_settings(self, settings):
         """
@@ -103,6 +108,43 @@ class Analyse:
 
         print(f"Warning: Invalid settings type: {type(settings)}. Expected str, dict, or None.")
         return {}
+
+    def _detect_settings_file(self):
+        """
+        Auto-detect settings file in the data folder.
+
+        Checks for .parameterSettings.json or parameterSettings.json in the data folder.
+        Hidden file takes precedence.
+
+        Returns:
+            str or None: Path to settings file if found, None otherwise.
+        """
+        for filename in ['.parameterSettings.json', 'parameterSettings.json']:
+            settings_path = os.path.join(self.data_folder, filename)
+            if os.path.exists(settings_path):
+                return settings_path
+        return None
+
+    def _get_settings_source(self, settings):
+        """
+        Determine the source of the settings for display purposes.
+
+        Args:
+            settings: The settings parameter passed to __init__ or auto-detected.
+
+        Returns:
+            str: Human-readable description of settings source.
+        """
+        if settings is None:
+            return "defaults"
+        if isinstance(settings, dict):
+            return "dictionary"
+        if isinstance(settings, str):
+            if settings in DEFAULT_PARAMS:
+                return f"preset '{settings}'"
+            # It's a file path
+            return f"file '{os.path.basename(settings)}'"
+        return "unknown"
 
     def _get_association_defaults(self):
         """
@@ -196,6 +238,10 @@ class Analyse:
             logger.setLevel(logging.INFO)
         else:
             logger.setLevel(logging.WARNING)
+
+        # Print settings info if verbosity >= 1 (matches CLI behavior)
+        if verbosity >= 1 and self.settings:
+            print(f"⚙️  Using settings: {self.settings_source}")
 
         def get_key(f):
             return os.path.basename(f).rsplit('.', 1)[0]
