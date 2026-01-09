@@ -406,6 +406,21 @@ def main_assoc():
             verbosity=verbosity
         )
 
+        # Generate plots
+        if verbosity >= 1:
+            print(f"\n📊 Generating association quality plots...")
+
+        try:
+            plot_files = analyser.plot_stats(
+                output_dir=args.output_dir,
+                verbosity=verbosity
+            )
+        except Exception as e:
+            if verbosity >= 2:
+                print(f"⚠️  Warning: Could not generate plots: {e}")
+                import traceback
+                traceback.print_exc()
+
         if verbosity >= 1:
             print(f"\n✅ Analysis complete!")
             print(f"   Results saved to: {output_path}")

@@ -1782,3 +1782,244 @@ For more information, see: https://github.com/nuclear/neutron_event_analyzer
             print(f"   Columns: {len(df_to_save.columns)}")
 
         return output_path
+
+    def plot_stats(self, output_dir=None, verbosity=None):
+        """
+        Generate comprehensive association quality plots.
+        
+        Creates plots showing:
+        - Pixel-photon association statistics (if pixels were loaded)
+        - Photon-event association statistics
+        - Correlation plots
+        - Distribution comparisons
+        
+        Args:
+            output_dir (str, optional): Output directory for plots. If None, uses 'AssociatedResults' folder.
+            verbosity (int, optional): Verbosity level. If None, uses instance verbosity.
+        
+        Returns:
+            list: Paths to generated plot files.
+        
+        Raises:
+            ValueError: If no association has been performed yet.
+        """
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        import numpy as np
+        
+        # Use instance verbosity if not specified
+        if verbosity is None:
+            verbosity = self.verbosity
+        
+        if self.associated_df is None or len(self.associated_df) == 0:
+            raise ValueError("No association data to plot. Run associate() first.")
+        
+        # Determine output directory
+        if output_dir is None:
+            output_dir = os.path.join(self.data_folder, "AssociatedResults")
+        
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Set seaborn style
+        sns.set_theme(style="whitegrid")
+        plot_files = []
+        
+        df = self.associated_df
+        
+        # Plot 1: Association rate overview
+        if verbosity >= 1:
+            print("📊 Generating association rate plot...")
+        
+        fig, ax = plt.subplots(figsize=(10, 6))
+        
+        total_photons = len(df)
+        associated_mask = df['assoc_event_id'].notna() if 'assoc_event_id' in df.columns else df['assoc_cluster_id'].notna()
+        associated_count = associated_mask.sum()
+        unassociated_count = total_photons - associated_count
+        
+        data = pd.DataFrame({
+            'Status': ['Associated', 'Unassociated'],
+            'Count': [associated_count, unassociated_count],
+            'Percentage': [100 * associated_count / total_photons, 100 * unassociated_count / total_photons]
+        })
+        
+        sns.barplot(data=data, x='Status', y='Percentage', ax=ax, palette='Set2')
+        ax.set_ylabel('Percentage (%)', fontsize=12)
+        ax.set_title(f'Association Rate: {100 * associated_count / total_photons:.1f}%', fontsize=14, fontweight='bold')
+        
+        # Add percentage labels on bars
+        for i, (count, pct) in enumerate(zip(data['Count'], data['Percentage'])):
+            ax.text(i, pct + 1, f'{pct:.1f}%\n({count} photons)', ha='center', va='bottom', fontsize=10)
+        
+        plt.tight_layout()
+        plot_path = os.path.join(output_dir, 'association_rate.png')
+        plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        plot_files.append(plot_path)
+        
+        # Plot 2: Spatial differences (photon-event)
+        if 'spatial_diff_px' in df.columns and associated_count > 0:
+            if verbosity >= 1:
+                print("📊 Generating spatial difference distribution...")
+            
+            fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+            
+            # Histogram
+            spatial_diffs = df[associated_mask]['spatial_diff_px'].dropna()
+            axes[0].hist(spatial_diffs, bins=50, edgecolor='black', alpha=0.7, color='steelblue')
+            axes[0].axvline(spatial_diffs.median(), color='red', linestyle='--', linewidth=2, label=f'Median: {spatial_diffs.median():.2f} px')
+            axes[0].set_xlabel('Spatial Difference (pixels)', fontsize=12)
+            axes[0].set_ylabel('Frequency', fontsize=12)
+            axes[0].set_title('Photon-Event Spatial Difference Distribution', fontsize=13, fontweight='bold')
+            axes[0].legend()
+            axes[0].grid(True, alpha=0.3)
+            
+            # Box plot
+            sns.boxplot(y=spatial_diffs, ax=axes[1], color='steelblue')
+            axes[1].set_ylabel('Spatial Difference (pixels)', fontsize=12)
+            axes[1].set_title('Spatial Difference Box Plot', fontsize=13, fontweight='bold')
+            axes[1].grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            plot_path = os.path.join(output_dir, 'spatial_difference_distribution.png')
+            plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+            plt.close()
+            plot_files.append(plot_path)
+        
+        # Plot 3: Time differences (photon-event)
+        if 'time_diff_ns' in df.columns and associated_count > 0:
+            if verbosity >= 1:
+                print("📊 Generating temporal difference distribution...")
+            
+            fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+            
+            time_diffs = df[associated_mask]['time_diff_ns'].dropna()
+            
+            # Histogram
+            axes[0].hist(time_diffs, bins=50, edgecolor='black', alpha=0.7, color='coral')
+            axes[0].axvline(time_diffs.median(), color='red', linestyle='--', linewidth=2, label=f'Median: {time_diffs.median():.2f} ns')
+            axes[0].set_xlabel('Time Difference (nanoseconds)', fontsize=12)
+            axes[0].set_ylabel('Frequency', fontsize=12)
+            axes[0].set_title('Photon-Event Time Difference Distribution', fontsize=13, fontweight='bold')
+            axes[0].legend()
+            axes[0].grid(True, alpha=0.3)
+            
+            # Box plot
+            sns.boxplot(y=time_diffs, ax=axes[1], color='coral')
+            axes[1].set_ylabel('Time Difference (nanoseconds)', fontsize=12)
+            axes[1].set_title('Time Difference Box Plot', fontsize=13, fontweight='bold')
+            axes[1].grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            plot_path = os.path.join(output_dir, 'time_difference_distribution.png')
+            plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+            plt.close()
+            plot_files.append(plot_path)
+        
+        # Plot 4: Correlation plot (spatial vs temporal differences)
+        if 'spatial_diff_px' in df.columns and 'time_diff_ns' in df.columns and associated_count > 0:
+            if verbosity >= 1:
+                print("📊 Generating correlation plot...")
+            
+            fig, ax = plt.subplots(figsize=(10, 8))
+            
+            plot_df = df[associated_mask][['spatial_diff_px', 'time_diff_ns']].dropna()
+            
+            # Hexbin for better visualization with many points
+            hexbin = ax.hexbin(plot_df['time_diff_ns'], plot_df['spatial_diff_px'],
+                              gridsize=50, cmap='YlOrRd', mincnt=1)
+            plt.colorbar(hexbin, ax=ax, label='Count')
+            
+            ax.set_xlabel('Time Difference (nanoseconds)', fontsize=12)
+            ax.set_ylabel('Spatial Difference (pixels)', fontsize=12)
+            ax.set_title('Spatial vs Temporal Difference Correlation', fontsize=14, fontweight='bold')
+            ax.grid(True, alpha=0.3)
+            
+            # Add correlation coefficient
+            corr = plot_df.corr().iloc[0, 1]
+            ax.text(0.05, 0.95, f'Correlation: {corr:.3f}', transform=ax.transAxes,
+                   fontsize=12, verticalalignment='top',
+                   bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+            
+            plt.tight_layout()
+            plot_path = os.path.join(output_dir, 'spatial_temporal_correlation.png')
+            plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+            plt.close()
+            plot_files.append(plot_path)
+        
+        # Plot 5: Event size distribution
+        if associated_count > 0:
+            if verbosity >= 1:
+                print("📊 Generating event size distribution...")
+            
+            event_col = 'assoc_event_id' if 'assoc_event_id' in df.columns else 'assoc_cluster_id'
+            event_sizes = df[associated_mask].groupby(event_col).size()
+            
+            fig, ax = plt.subplots(figsize=(10, 6))
+            
+            sns.histplot(event_sizes, bins=range(1, event_sizes.max() + 2), ax=ax, 
+                        kde=False, edgecolor='black', color='mediumseagreen')
+            
+            ax.axvline(event_sizes.median(), color='red', linestyle='--', linewidth=2,
+                      label=f'Median: {event_sizes.median():.1f} photons/event')
+            ax.axvline(event_sizes.mean(), color='blue', linestyle='--', linewidth=2,
+                      label=f'Mean: {event_sizes.mean():.1f} photons/event')
+            
+            ax.set_xlabel('Photons per Event', fontsize=12)
+            ax.set_ylabel('Number of Events', fontsize=12)
+            ax.set_title('Event Size Distribution', fontsize=14, fontweight='bold')
+            ax.legend()
+            ax.grid(True, alpha=0.3, axis='y')
+            
+            plt.tight_layout()
+            plot_path = os.path.join(output_dir, 'event_size_distribution.png')
+            plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+            plt.close()
+            plot_files.append(plot_path)
+        
+        # Plot 6: X-Y position scatter (showing association quality)
+        if 'x' in df.columns and 'y' in df.columns and associated_count > 0:
+            if verbosity >= 1:
+                print("📊 Generating position scatter plot...")
+            
+            fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+            
+            # Unassociated photons
+            unassoc_df = df[~associated_mask]
+            if len(unassoc_df) > 0:
+                axes[0].scatter(unassoc_df['x'], unassoc_df['y'], alpha=0.3, s=10, c='gray', label='Unassociated')
+            
+            # Associated photons
+            assoc_df = df[associated_mask]
+            axes[0].scatter(assoc_df['x'], assoc_df['y'], alpha=0.5, s=10, c='blue', label='Associated')
+            
+            axes[0].set_xlabel('X Position (pixels)', fontsize=12)
+            axes[0].set_ylabel('Y Position (pixels)', fontsize=12)
+            axes[0].set_title('Photon Positions: Associated vs Unassociated', fontsize=13, fontweight='bold')
+            axes[0].legend()
+            axes[0].grid(True, alpha=0.3)
+            axes[0].set_aspect('equal')
+            
+            # Heatmap of associated photons
+            if len(assoc_df) > 0:
+                h = axes[1].hist2d(assoc_df['x'], assoc_df['y'], bins=50, cmap='hot')
+                plt.colorbar(h[3], ax=axes[1], label='Photon Count')
+                axes[1].set_xlabel('X Position (pixels)', fontsize=12)
+                axes[1].set_ylabel('Y Position (pixels)', fontsize=12)
+                axes[1].set_title('Associated Photon Density Heatmap', fontsize=13, fontweight='bold')
+                axes[1].set_aspect('equal')
+            
+            plt.tight_layout()
+            plot_path = os.path.join(output_dir, 'position_scatter.png')
+            plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+            plt.close()
+            plot_files.append(plot_path)
+        
+        # Summary
+        if verbosity >= 1:
+            print(f"\n✅ Generated {len(plot_files)} plots:")
+            for i, path in enumerate(plot_files, 1):
+                print(f"   {i}. {os.path.basename(path)}")
+            print(f"\n📁 Plots saved to: {output_dir}")
+        
+        return plot_files
