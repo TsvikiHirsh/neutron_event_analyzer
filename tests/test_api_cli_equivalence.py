@@ -178,7 +178,7 @@ class TestAPICLIEquivalence:
             assert os.path.exists(output_path)
 
     def test_verbosity_shows_settings_source(self, complete_data_scenario):
-        """Test that verbosity >= 1 shows settings source."""
+        """Test that verbosity >= 2 shows settings source."""
         with tempfile.TemporaryDirectory() as tmpdir:
             data_path = Path(tmpdir)
 
@@ -203,16 +203,13 @@ class TestAPICLIEquivalence:
             with open(settings_file, 'w') as f:
                 json.dump(settings, f)
 
-            # Initialize
-            analyser = nea.Analyse(data_folder=str(data_path))
-
-            # Capture output when loading with verbosity
+            # Capture output when initializing with verbosity=2
             import io
             from contextlib import redirect_stdout
 
             f = io.StringIO()
             with redirect_stdout(f):
-                analyser.load(verbosity=1)
+                analyser = nea.Analyse(data_folder=str(data_path), verbosity=2)
 
             output = f.getvalue()
 
