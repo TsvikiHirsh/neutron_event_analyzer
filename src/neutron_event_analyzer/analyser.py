@@ -68,7 +68,7 @@ class Analyse:
         return False, []
 
     def __init__(self, data_folder, export_dir="./export", n_threads=10, use_lumacam=False, settings=None,
-                 verbosity=1, events=True, photons=True, pixels=True, limit=None, query=None):
+                 verbosity=1, events=True, photons=True, pixels=True, limit=None, query=None, parent_settings=None):
         """
         Initialize the Analyse object and automatically load data.
 
@@ -99,6 +99,7 @@ class Analyse:
             pixels (bool): Whether to load pixels (default: True).
             limit (int, optional): If provided, limit the number of rows loaded for all data types.
             query (str, optional): If provided, apply a pandas query string to filter the events dataframe.
+            parent_settings (dict, optional): Settings inherited from parent groupby folder. Used internally.
         """
         self.data_folder = data_folder
         # Use EMPIR_PATH environment variable if export_dir not provided or is default
@@ -127,23 +128,33 @@ class Analyse:
         self.groupby_subdirs = subdirs if is_groupby else []
         self.groupby_results = {}  # Store results from grouped analyses
 
+        # Auto-detect settings if not provided (do this even for groupby folders)
+        if settings is None:
+            # Try to detect settings file in current folder
+            detected_settings = self._detect_settings_file()
+            if detected_settings:
+                settings = detected_settings
+            elif parent_settings is not None:
+                # Fall back to parent settings if no local settings found
+                settings = parent_settings
+                if verbosity >= 2:
+                    print("⚙️  Inheriting settings from parent folder")
+
+        # Load settings (do this even for groupby folders so they can be passed to child groups)
+        self.settings = self._load_settings(settings)
+        self.settings_source = self._get_settings_source(settings)
+
         if is_groupby:
             if verbosity >= 1:
                 print(f"📁 Detected groupby folder structure with {len(subdirs)} groups:")
                 for subdir in subdirs:
                     print(f"   - {subdir}")
+                if self.settings:
+                    print(f"⚙️  Will use settings from: {self.settings_source}")
                 print("\nℹ️  Use .associate() to run association on all groups in parallel")
                 print("    or access individual groups using: Analyse(f'{data_folder}/group_name')")
             # Don't auto-load data for groupby folders
             return
-
-        # Auto-detect settings if not provided
-        if settings is None:
-            settings = self._detect_settings_file()
-
-        # Load settings
-        self.settings = self._load_settings(settings)
-        self.settings_source = self._get_settings_source(settings)
 
         # Show settings info if verbosity >= 2
         if verbosity >= 2 and self.settings:
@@ -1005,7 +1016,7 @@ class Analyse:
         # Auto-save results
         if len(self.associated_df) > 0:
             try:
-                output_path = self.save_associated_data(verbosity=verbosity)
+                output_path = self.save_associations(verbosity=verbosity)
                 if verbosity >= 1:
                     print(f"💾 Auto-saved results to: {output_path}")
             except Exception as e:
@@ -1055,11 +1066,14 @@ class Analyse:
             group_path = os.path.join(self.data_folder, group_name)
             try:
                 # Create Analyse instance for this group
+                # Pass parent settings to child groups (child can override with its own settings file)
                 group_assoc = Analyse(
                     group_path,
                     export_dir=self.export_dir,
                     n_threads=self.n_threads,  # Use all threads for each group
                     use_lumacam=self.use_lumacam,
+                    settings=None,  # Let child auto-detect its own settings first
+                    parent_settings=self.settings,  # Provide parent settings as fallback
                     verbosity=0  # Suppress individual group output
                 )
 
@@ -1098,7 +1112,7 @@ class Analyse:
                     self.associated_df = group_df
                     self.data_folder = os.path.join(original_folder, group_name)
 
-                    output_path = self.save_associated_data(verbosity=0)
+                    output_path = self.save_associations(verbosity=0)
                     saved_count += 1
                     if verbosity >= 2:
                         print(f"   ✅ {group_name}: {output_path}")
