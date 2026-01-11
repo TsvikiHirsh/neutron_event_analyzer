@@ -334,8 +334,39 @@ class Analyse:
 
         # Load event-photon pairs if requested
         if events or photons:
-            event_files = glob.glob(os.path.join(self.data_folder, event_glob)) if events else []
-            photon_files = glob.glob(os.path.join(self.data_folder, photon_glob)) if photons else []
+            # First check for already exported CSV files
+            exported_events_dir = os.path.join(self.data_folder, "ExportedEvents")
+            exported_photons_dir = os.path.join(self.data_folder, "ExportedPhotons")
+
+            # Build file lists - prefer exported CSVs if they exist
+            event_files = []
+            photon_files = []
+
+            if events:
+                if os.path.exists(exported_events_dir):
+                    exported_event_csvs = glob.glob(os.path.join(exported_events_dir, "*.csv"))
+                    if exported_event_csvs:
+                        event_files = exported_event_csvs
+                        if verbosity >= 2:
+                            print(f"Using {len(event_files)} exported event CSV files from ExportedEvents/")
+                if not event_files:
+                    # Fall back to binary files
+                    event_files = glob.glob(os.path.join(self.data_folder, event_glob))
+                    if verbosity >= 2 and event_files:
+                        print(f"Using {len(event_files)} binary event files")
+
+            if photons:
+                if os.path.exists(exported_photons_dir):
+                    exported_photon_csvs = glob.glob(os.path.join(exported_photons_dir, "*.csv"))
+                    if exported_photon_csvs:
+                        photon_files = exported_photon_csvs
+                        if verbosity >= 2:
+                            print(f"Using {len(photon_files)} exported photon CSV files from ExportedPhotons/")
+                if not photon_files:
+                    # Fall back to binary files
+                    photon_files = glob.glob(os.path.join(self.data_folder, photon_glob))
+                    if verbosity >= 2 and photon_files:
+                        print(f"Using {len(photon_files)} binary photon files")
 
             event_dict = {get_key(f): f for f in event_files}
             photon_dict = {get_key(f): f for f in photon_files}
@@ -481,12 +512,18 @@ class Analyse:
         basename = os.path.splitext(os.path.basename(eventfile))[0]
 
         # Check for already exported CSV in ExportedEvents folder
+        # Try both with and without "exported_" prefix (lumacam adds this prefix)
         exported_csv = os.path.join(self.data_folder, "ExportedEvents", f"{basename}.csv")
+        exported_csv_with_prefix = os.path.join(self.data_folder, "ExportedEvents", f"exported_{basename}.csv")
 
         if os.path.exists(exported_csv):
             # Use already exported CSV
             logger.info(f"Using existing CSV: {exported_csv}")
             csv_file = exported_csv
+        elif os.path.exists(exported_csv_with_prefix):
+            # Use CSV with exported_ prefix
+            logger.info(f"Using existing CSV: {exported_csv_with_prefix}")
+            csv_file = exported_csv_with_prefix
         else:
             # Fall back to empir binary conversion
             export_bin = os.path.join(self.export_dir, "empir_export_events")
@@ -561,12 +598,18 @@ class Analyse:
         basename = os.path.splitext(os.path.basename(photonfile))[0]
 
         # Check for already exported CSV in ExportedPhotons folder
+        # Try both with and without "exported_" prefix (lumacam adds this prefix)
         exported_csv = os.path.join(self.data_folder, "ExportedPhotons", f"{basename}.csv")
+        exported_csv_with_prefix = os.path.join(self.data_folder, "ExportedPhotons", f"exported_{basename}.csv")
 
         if os.path.exists(exported_csv):
             # Use already exported CSV
             logger.info(f"Using existing CSV: {exported_csv}")
             csv_file = exported_csv
+        elif os.path.exists(exported_csv_with_prefix):
+            # Use CSV with exported_ prefix
+            logger.info(f"Using existing CSV: {exported_csv_with_prefix}")
+            csv_file = exported_csv_with_prefix
         else:
             # Fall back to empir binary conversion
             export_bin = os.path.join(self.export_dir, "empir_export_photons")
@@ -625,12 +668,18 @@ class Analyse:
         basename = os.path.splitext(os.path.basename(pixelfile))[0]
 
         # Check for already exported CSV in ExportedPixels folder
+        # Try both with and without "exported_" prefix (lumacam adds this prefix)
         exported_csv = os.path.join(self.data_folder, "ExportedPixels", f"{basename}.csv")
+        exported_csv_with_prefix = os.path.join(self.data_folder, "ExportedPixels", f"exported_{basename}.csv")
 
         if os.path.exists(exported_csv):
             # Use already exported CSV
             logger.info(f"Using existing CSV: {exported_csv}")
             csv_file = exported_csv
+        elif os.path.exists(exported_csv_with_prefix):
+            # Use CSV with exported_ prefix
+            logger.info(f"Using existing CSV: {exported_csv_with_prefix}")
+            csv_file = exported_csv_with_prefix
         else:
             # Fall back to empir binary conversion
             export_bin = os.path.join(self.export_dir, "empir_pixel2photon")
