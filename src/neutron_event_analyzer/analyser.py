@@ -330,7 +330,12 @@ class Analyse:
             logger.setLevel(logging.WARNING)
 
         def get_key(f):
-            return os.path.basename(f).rsplit('.', 1)[0]
+            """Get key for file matching, stripping exported_ prefix if present."""
+            basename = os.path.basename(f).rsplit('.', 1)[0]
+            # Strip 'exported_' prefix that lumacam adds
+            if basename.startswith('exported_'):
+                basename = basename[9:]  # len('exported_') = 9
+            return basename
 
         # Load event-photon pairs if requested
         if events or photons:
@@ -629,7 +634,20 @@ class Analyse:
             if verbosity >= 2:
                 print(f"Read photon CSV with shape {df.shape}, columns: {df.columns.tolist()}")
 
-            df.columns = ["x", "y", "t", "tof"]
+            # Handle different CSV formats
+            expected_cols = ["x", "y", "t", "tof"]
+            if df.columns.tolist() == ["x", "y", "toa", "tof"]:
+                # Lumacam format uses 'toa' instead of 't'
+                df.columns = expected_cols
+            elif len(df.columns) == 4:
+                # Assume it's in the correct order, just rename
+                df.columns = expected_cols
+            else:
+                logger.error(f"Unexpected photon CSV format. Expected 4 columns, got {len(df.columns)}: {df.columns.tolist()}")
+                if verbosity >= 2:
+                    print(f"Warning: Unexpected photon CSV format with columns: {df.columns.tolist()}")
+                return None
+
             df["x"] = df["x"].astype(float)
             df["y"] = df["y"].astype(float)
             df["t"] = df["t"].astype(float)
