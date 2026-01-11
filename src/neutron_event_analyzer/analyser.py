@@ -1052,22 +1052,28 @@ class Analyse:
             # Clean up temporary merge columns
             pixels_full = pixels_full.drop(columns=['_merge_x', '_merge_y', '_merge_t'])
 
+            # Standardize column names with prefixes
+            pixels_full = self._standardize_column_names(pixels_full, verbosity=verbosity)
+
             self.associated_df = pixels_full
 
             if verbosity >= 2:
-                n_pixels_with_events = pixels_full['assoc_event_id'].notna().sum()
-                print(f"✅ {n_pixels_with_events} pixels associated through full chain to events")
+                n_pixels_with_events = pixels_full['assoc_event_id'].notna().sum() if 'assoc_event_id' in pixels_full.columns else 0
+                if n_pixels_with_events > 0:
+                    print(f"✅ {n_pixels_with_events} pixels associated through full chain to events")
 
         # Case 2: Pixels → Photons only
         elif has_pixels and has_photons:
             if verbosity >= 2:
                 print("\nPerforming 2-tier association: Pixels → Photons")
-            self.associated_df = self._associate_pixels_to_photons_simple(
+            pixels_associated = self._associate_pixels_to_photons_simple(
                 self.pixels_df, self.photons_df,
                 max_dist_px=pixel_max_dist_px,
                 max_time_ns=pixel_max_time_ns,
                 verbosity=verbosity
             )
+            # Standardize column names
+            self.associated_df = self._standardize_column_names(pixels_associated, verbosity=verbosity)
 
         # Case 3: Photons → Events only (standard association)
         elif has_photons and has_events:
@@ -1744,6 +1750,75 @@ class Analyse:
             print(f"✅ Matched {matched} of {total} pixels to photons ({100 * matched / total:.1f}%)")
 
         return pixels
+
+    def _standardize_column_names(self, df, verbosity=0):
+        r"""
+        Standardize column names with prefixes: px\ for pixels, ph\ for photons, ev\ for events.
+        Also add ph\n column counting pixels per photon.
+
+        Args:
+            df (pd.DataFrame): DataFrame to standardize
+            verbosity (int): Verbosity level
+
+        Returns:
+            pd.DataFrame: DataFrame with standardized column names
+        """
+        rename_map = {}
+
+        # Pixel columns (original data)
+        if 'x' in df.columns:
+            rename_map['x'] = 'px\\x'
+        if 'y' in df.columns:
+            rename_map['y'] = 'px\\y'
+        if 't' in df.columns:
+            rename_map['t'] = 'px\\toa'
+        if 'tot' in df.columns:
+            rename_map['tot'] = 'px\\tot'
+        if 'tof' in df.columns:
+            rename_map['tof'] = 'px\\tof'
+
+        # Photon association columns
+        if 'assoc_photon_id' in df.columns:
+            rename_map['assoc_photon_id'] = 'ph\\id'
+        if 'assoc_phot_x' in df.columns:
+            rename_map['assoc_phot_x'] = 'ph\\x'
+        if 'assoc_phot_y' in df.columns:
+            rename_map['assoc_phot_y'] = 'ph\\y'
+        if 'assoc_phot_t' in df.columns:
+            rename_map['assoc_phot_t'] = 'ph\\toa'
+
+        # Pixel-photon difference columns
+        if 'pixel_time_diff_ns' in df.columns:
+            rename_map['pixel_time_diff_ns'] = 'px\\dt'
+        if 'pixel_spatial_diff_px' in df.columns:
+            rename_map['pixel_spatial_diff_px'] = 'px\\dr'
+
+        # Event association columns
+        if 'assoc_event_id' in df.columns:
+            rename_map['assoc_event_id'] = 'ev\\id'
+        if 'assoc_x' in df.columns:
+            rename_map['assoc_x'] = 'ev\\x'
+        if 'assoc_y' in df.columns:
+            rename_map['assoc_y'] = 'ev\\y'
+        if 'assoc_t' in df.columns:
+            rename_map['assoc_t'] = 'ev\\toa'
+        if 'assoc_n' in df.columns:
+            rename_map['assoc_n'] = 'ev\\n'
+        if 'assoc_PSD' in df.columns:
+            rename_map['assoc_PSD'] = 'ev\\psd'
+
+        # Apply renaming
+        df = df.rename(columns=rename_map)
+
+        # Add ph\n column: count of pixels per photon
+        if 'ph\\id' in df.columns:
+            photon_pixel_counts = df.groupby('ph\\id').size()
+            df['ph\\n'] = df['ph\\id'].map(photon_pixel_counts).fillna(0).astype(int)
+
+            if verbosity >= 2:
+                print(f"Added ph\\n column: {df['ph\\n'].describe()}")
+
+        return df
 
     def compute_ellipticity(self, x_col='x', y_col='y', event_col=None, verbosity=1):
         """
