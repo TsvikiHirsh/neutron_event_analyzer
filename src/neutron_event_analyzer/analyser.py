@@ -358,19 +358,29 @@ class Analyse:
                 with ProcessPoolExecutor(max_workers=self.n_threads) as executor:
                     futures = [executor.submit(self._process_pair, pair, tmp_dir, verbosity) for pair in self.pair_files]
                     self.pair_dfs = []
-                    for future in tqdm(as_completed(futures), total=len(futures), desc="Loading event-photon pairs"):
+                    for future in tqdm(as_completed(futures), total=len(futures), desc="Loading event-photon pairs", disable=(verbosity == 0)):
                         result = future.result()
                         if result is not None:
                             self.pair_dfs.append(result)
 
             # Concatenate for full DataFrames
             if self.pair_dfs and events:
-                self.events_df = pd.concat([edf for edf, pdf in self.pair_dfs if edf is not None], ignore_index=True).replace(" nan", float("nan"))
+                event_dfs = [edf for edf, pdf in self.pair_dfs if edf is not None]
+                if event_dfs:
+                    self.events_df = pd.concat(event_dfs, ignore_index=True).replace(" nan", float("nan"))
+                else:
+                    logger.error("No event data could be loaded. Check that ExportedEvents folder exists or empir binaries are available.")
+                    self.events_df = pd.DataFrame()
             else:
                 self.events_df = pd.DataFrame()
 
             if self.pair_dfs and photons:
-                self.photons_df = pd.concat([pdf for edf, pdf in self.pair_dfs if pdf is not None], ignore_index=True).replace(" nan", float("nan"))
+                photon_dfs = [pdf for edf, pdf in self.pair_dfs if pdf is not None]
+                if photon_dfs:
+                    self.photons_df = pd.concat(photon_dfs, ignore_index=True).replace(" nan", float("nan"))
+                else:
+                    logger.error("No photon data could be loaded. Check that ExportedPhotons folder exists or empir binaries are available.")
+                    self.photons_df = pd.DataFrame()
             else:
                 self.photons_df = pd.DataFrame()
 
@@ -433,7 +443,7 @@ class Analyse:
                     futures = {executor.submit(self._convert_pixel_file, pfile, tmp_dir, verbosity): key
                               for key, pfile in pixel_dict.items()}
                     pixel_dfs = []
-                    for future in tqdm(as_completed(futures), total=len(futures), desc="Loading pixels"):
+                    for future in tqdm(as_completed(futures), total=len(futures), desc="Loading pixels", disable=(verbosity == 0)):
                         result = future.result()
                         if result is not None:
                             pixel_dfs.append(result)
@@ -445,8 +455,10 @@ class Analyse:
                 if limit is not None:
                     self.pixels_df = self.pixels_df.head(limit)
 
-                print(f"Loaded {len(self.pixels_df)} pixels in total.")
+                if verbosity >= 1:
+                    print(f"Loaded {len(self.pixels_df)} pixels in total.")
             else:
+                logger.error("No pixel data could be loaded. Check that ExportedPixels folder exists or empir binaries are available.")
                 self.pixels_df = pd.DataFrame()
 
     def _convert_event_file(self, eventfile, tmp_dir, verbosity=0):
@@ -479,7 +491,8 @@ class Analyse:
             # Fall back to empir binary conversion
             export_bin = os.path.join(self.export_dir, "empir_export_events")
             if not os.path.exists(export_bin):
-                if verbosity >= 1:
+                logger.error(f"empir_export_events binary not found at {export_bin} and no exported CSV found at {exported_csv}")
+                if verbosity >= 2:
                     print(f"Warning: empir_export_events binary not found at {export_bin} and no exported CSV found at {exported_csv}")
                 return None
 
@@ -523,7 +536,8 @@ class Analyse:
 
             return df
         except Exception as e:
-            if verbosity >= 1:
+            logger.error(f"Error processing {csv_file}: {e}")
+            if verbosity >= 2:
                 print(f"Error processing {csv_file}: {e}")
             return None
 
@@ -557,7 +571,8 @@ class Analyse:
             # Fall back to empir binary conversion
             export_bin = os.path.join(self.export_dir, "empir_export_photons")
             if not os.path.exists(export_bin):
-                if verbosity >= 1:
+                logger.error(f"empir_export_photons binary not found at {export_bin} and no exported CSV found at {exported_csv}")
+                if verbosity >= 2:
                     print(f"Warning: empir_export_photons binary not found at {export_bin} and no exported CSV found at {exported_csv}")
                 return None
 
@@ -583,10 +598,10 @@ class Analyse:
 
             return df
         except Exception as e:
-            if verbosity >= 1:
-                print(f"Error processing photon file {csv_file}: {e}")
-            import traceback
+            logger.error(f"Error processing photon file {csv_file}: {e}")
             if verbosity >= 2:
+                print(f"Error processing photon file {csv_file}: {e}")
+                import traceback
                 traceback.print_exc()
             return None
 
@@ -779,7 +794,7 @@ class Analyse:
                 ) for pair in self.pair_dfs
             ]
             associated_list = []
-            for future in tqdm(as_completed(futures), total=len(futures), desc="Associating pairs"):
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Associating pairs", disable=(verbosity == 0)):
                 result = future.result()
                 if result is not None:
                     associated_list.append(result)
@@ -1155,7 +1170,7 @@ class Analyse:
         def fix_time_with_progress(df, label="DataFrame"):
             df = df.sort_values("t_s").reset_index(drop=True)
             t_s = df["t_s"].to_numpy()
-            for i in tqdm(range(1, len(t_s)), desc=f"Fixing time for {label}"):
+            for i in tqdm(range(1, len(t_s)), desc=f"Fixing time for {label}", disable=(verbosity == 0)):
                 if t_s[i] <= t_s[i - 1]:
                     t_s[i] = t_s[i - 1] + 1e-12
             df["t_s"] = t_s
@@ -1200,7 +1215,7 @@ class Analyse:
         result_df["assoc_n"] = 0  # Default to 0 if missing
         result_df["assoc_PSD"] = 0  # Default to 0 if missing
 
-        for cluster_id in tqdm(assoc.clusters.index, desc="Assigning event data"):
+        for cluster_id in tqdm(assoc.clusters.index, desc="Assigning event data", disable=(verbosity == 0)):
             photon_indices = np.where(cluster_associations == cluster_id)[0]
             event_indices = np.where(cluster_event_indices == cluster_id)[0]
             if len(event_indices) > 0:
@@ -1257,7 +1272,7 @@ class Analyse:
         ]).T
         tree = cKDTree(photon_coords)
 
-        for event in tqdm(events.iterrows(), total=len(events), desc="Associating events"):
+        for event in tqdm(events.iterrows(), total=len(events), desc="Associating events", disable=(verbosity == 0)):
             i, event = event
             n_photons = int(event['n'])
             ex, ey, et = event['x'], event['y'], event['t']
@@ -1372,7 +1387,7 @@ class Analyse:
         left = 0
         n_photons_total = len(photons)
 
-        for _, ev in tqdm(events.iterrows(), total=len(events), desc="Associating events"):
+        for _, ev in tqdm(events.iterrows(), total=len(events), desc="Associating events", disable=(verbosity == 0)):
             et, ex, ey, eid, n_photons = ev['t'], ev['x'], ev['y'], ev['event_id'], int(ev['n'])
 
             # Slide left pointer: drop photons earlier than (et - max_time_s)
@@ -1507,7 +1522,7 @@ class Analyse:
         left = 0
         n_total = len(photons)
 
-        for _, ev in tqdm(events.iterrows(), total=len(events), desc="Associating events"):
+        for _, ev in tqdm(events.iterrows(), total=len(events), desc="Associating events", disable=(verbosity == 0)):
             et, ex, ey, eid, n = ev['t'], ev['x'], ev['y'], ev['event_id'], int(ev['n'])
             psd = ev.get('PSD', 0)
 
