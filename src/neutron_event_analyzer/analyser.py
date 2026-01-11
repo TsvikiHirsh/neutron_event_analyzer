@@ -1006,10 +1006,10 @@ class Analyse:
 
     def associate_groupby(self, **kwargs):
         """
-        Run association on all groups in a groupby folder structure in parallel.
+        Run association on all groups in a groupby folder structure sequentially with progress bar.
 
         This method processes each subdirectory as a separate Analyse instance and runs
-        association on all groups in parallel using the specified parameters.
+        association on all groups sequentially (with a progress bar to show progress).
 
         Args:
             **kwargs: Arguments to pass to the associate() method for each group.
@@ -1029,51 +1029,43 @@ class Analyse:
         if not self.is_groupby:
             raise ValueError("This is not a groupby folder structure. Use .associate() instead.")
 
-        verbosity = kwargs.get('verbosity', self.verbosity)
+        # Handle verbosity - default to instance verbosity if not specified
+        verbosity = kwargs.get('verbosity')
+        if verbosity is None:
+            verbosity = self.verbosity if self.verbosity is not None else 1
 
         if verbosity >= 1:
             print(f"\n{'='*70}")
             print(f"Running Association on {len(self.groupby_subdirs)} Groups")
             print(f"{'='*70}")
 
-        # Function to process a single group
-        def _process_group(group_name):
+        # Process groups sequentially with progress bar
+        results = {}
+        for group_name in tqdm(self.groupby_subdirs, desc="Processing groups", disable=(verbosity == 0)):
             group_path = os.path.join(self.data_folder, group_name)
             try:
                 # Create Analyse instance for this group
                 group_assoc = Analyse(
                     group_path,
                     export_dir=self.export_dir,
-                    n_threads=1,  # Each group uses single thread; parallelism is across groups
+                    n_threads=self.n_threads,  # Use all threads for each group
                     use_lumacam=self.use_lumacam,
                     verbosity=0  # Suppress individual group output
                 )
 
-                # Run association with provided kwargs
-                group_assoc.associate(**kwargs)
+                # Run association with provided kwargs (but override verbosity to 0)
+                kwargs_copy = kwargs.copy()
+                kwargs_copy['verbosity'] = 0
+                group_assoc.associate(**kwargs_copy)
 
-                return (group_name, group_assoc.associated_df)
+                results[group_name] = group_assoc.associated_df
+
+                if verbosity >= 2:
+                    print(f"✅ {group_name}: {len(group_assoc.associated_df)} rows")
             except Exception as e:
                 logger.error(f"Error processing group {group_name}: {e}")
-                return (group_name, None)
-
-        # Process groups in parallel
-        results = {}
-        with ProcessPoolExecutor(max_workers=self.n_threads) as executor:
-            futures = {executor.submit(_process_group, group_name): group_name
-                      for group_name in self.groupby_subdirs}
-
-            # Use tqdm progress bar
-            for future in tqdm(as_completed(futures), total=len(futures),
-                             desc="Processing groups", disable=(verbosity == 0)):
-                group_name, result_df = future.result()
-                if result_df is not None:
-                    results[group_name] = result_df
-                    if verbosity >= 2:
-                        print(f"✅ {group_name}: {len(result_df)} rows")
-                else:
-                    if verbosity >= 1:
-                        print(f"❌ {group_name}: Failed")
+                if verbosity >= 1:
+                    print(f"❌ {group_name}: Failed - {e}")
 
         self.groupby_results = results
 
@@ -1958,36 +1950,135 @@ For more information, see: https://github.com/nuclear/neutron_event_analyzer
 
         return output_path
 
-    def plot_stats(self, output_dir=None, verbosity=None):
+    def plot_stats(self, output_dir=None, verbosity=None, group=None):
         """
         Generate comprehensive association quality plots.
-        
+
+        Automatically handles both single folders and groupby structures:
+        - For single folders: Generates plots for the single dataset
+        - For groupby folders: Generates plots for each group (or specific group if specified)
+
         Creates plots showing:
         - Pixel-photon association statistics (if pixels were loaded)
         - Photon-event association statistics
         - Correlation plots
         - Distribution comparisons
-        
+
         Args:
             output_dir (str, optional): Output directory for plots. If None, uses 'AssociatedResults' folder.
             verbosity (int, optional): Verbosity level. If None, uses instance verbosity.
-        
+            group (str, optional): For groupby structures, specify which group to plot.
+                                  If None, plots all groups. Ignored for single folders.
+
         Returns:
-            list: Paths to generated plot files.
-        
+            dict or list: For groupby, dict mapping group names to plot file lists.
+                         For single folder, list of plot file paths.
+
         Raises:
             ValueError: If no association has been performed yet.
+
+        Example:
+            # Single folder
+            assoc = nea.Analyse("data/single/")
+            assoc.associate(relax=1.5)
+            plots = assoc.plot_stats()
+
+            # Grouped folders - all groups
+            assoc = nea.Analyse("data/grouped/")
+            assoc.associate(relax=1.5)
+            all_plots = assoc.plot_stats()  # Returns dict with all groups
+
+            # Grouped folders - specific group
+            plots = assoc.plot_stats(group='intensifier_gain_50')
         """
         import matplotlib.pyplot as plt
         import seaborn as sns
         import numpy as np
-        
+
         # Use instance verbosity if not specified
         if verbosity is None:
             verbosity = self.verbosity
-        
+            if verbosity is None:
+                verbosity = 1
+
+        # Handle groupby structures
+        if self.is_groupby:
+            if not self.groupby_results:
+                raise ValueError("No association data for groups. Run associate() first.")
+
+            # If specific group requested
+            if group is not None:
+                if group not in self.groupby_results:
+                    raise ValueError(f"Group '{group}' not found. Available groups: {list(self.groupby_results.keys())}")
+
+                # Temporarily set associated_df to this group's data
+                original_df = self.associated_df
+                original_folder = self.data_folder
+                self.associated_df = self.groupby_results[group]
+                self.data_folder = os.path.join(original_folder, group)
+
+                try:
+                    result = self._plot_stats_single(output_dir, verbosity)
+                finally:
+                    self.associated_df = original_df
+                    self.data_folder = original_folder
+
+                return result
+
+            # Plot all groups
+            all_results = {}
+            if verbosity >= 1:
+                print(f"\n📊 Generating plots for {len(self.groupby_results)} groups...")
+
+            for group_name, group_df in tqdm(self.groupby_results.items(),
+                                            desc="Plotting groups",
+                                            disable=(verbosity == 0)):
+                # Temporarily set associated_df
+                original_df = self.associated_df
+                original_folder = self.data_folder
+                self.associated_df = group_df
+                self.data_folder = os.path.join(original_folder, group_name)
+
+                try:
+                    if output_dir is None:
+                        group_output_dir = os.path.join(original_folder, group_name, "AssociatedResults")
+                    else:
+                        group_output_dir = os.path.join(output_dir, group_name)
+
+                    result = self._plot_stats_single(group_output_dir, 0)  # Suppress individual messages
+                    all_results[group_name] = result
+
+                    if verbosity >= 2:
+                        print(f"✅ {group_name}: {len(result)} plots generated")
+                finally:
+                    self.associated_df = original_df
+                    self.data_folder = original_folder
+
+            if verbosity >= 1:
+                print(f"\n✅ Generated plots for {len(all_results)} groups")
+
+            return all_results
+
+        # Single folder - check if data exists
         if self.associated_df is None or len(self.associated_df) == 0:
             raise ValueError("No association data to plot. Run associate() first.")
+
+        return self._plot_stats_single(output_dir, verbosity)
+
+    def _plot_stats_single(self, output_dir=None, verbosity=1):
+        """
+        Internal method to generate plots for a single dataset.
+
+        Args:
+            output_dir (str, optional): Output directory for plots.
+            verbosity (int): Verbosity level.
+
+        Returns:
+            list: Paths to generated plot files.
+        """
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        import numpy as np
         
         # Determine output directory
         if output_dir is None:
