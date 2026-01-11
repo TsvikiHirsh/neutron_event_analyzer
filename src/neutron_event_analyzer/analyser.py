@@ -45,7 +45,7 @@ class Analyse:
             data_folder (str): Path to the data folder containing 'photonFiles'/'eventFiles'/'tpx3Files' subdirectories
                               and optionally 'ExportedPhotons'/'ExportedEvents'/'ExportedPixels' subdirectories with CSV files.
             export_dir (str): Path to the directory containing export binaries (empir_export_events, empir_export_photons, empir_pixel2photon).
-                             Only required if pre-exported CSV files are not available.
+                             Only required if pre-exported CSV files are not available. Falls back to EMPIR_PATH environment variable if not specified.
             n_threads (int): Number of threads for parallel processing (default: 10).
             use_lumacam (bool): If True, prefer 'lumacam' for association when method='auto' (if available).
             settings (str or dict, optional): Path to settings JSON file or settings dictionary containing empir parameters.
@@ -58,7 +58,11 @@ class Analyse:
             query (str, optional): If provided, apply a pandas query string to filter the events dataframe.
         """
         self.data_folder = data_folder
-        self.export_dir = export_dir
+        # Use EMPIR_PATH environment variable if export_dir not provided or is default
+        if export_dir == "./export" and 'EMPIR_PATH' in os.environ:
+            self.export_dir = os.environ['EMPIR_PATH']
+        else:
+            self.export_dir = export_dir
         self.n_threads = n_threads
         self.use_lumacam = use_lumacam and LUMACAM_AVAILABLE
         self.verbosity = verbosity
