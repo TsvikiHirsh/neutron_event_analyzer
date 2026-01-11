@@ -1002,6 +1002,16 @@ class Analyse:
                 print(f"Final combined dataframe has {len(self.associated_df)} rows")
                 print(f"Columns: {self.associated_df.columns.tolist()}")
 
+        # Auto-save results
+        if len(self.associated_df) > 0:
+            try:
+                output_path = self.save_associated_data(verbosity=verbosity)
+                if verbosity >= 1:
+                    print(f"💾 Auto-saved results to: {output_path}")
+            except Exception as e:
+                if verbosity >= 1:
+                    print(f"⚠️  Warning: Could not auto-save results: {e}")
+
         return self.associated_df
 
     def associate_groupby(self, **kwargs):
@@ -1074,6 +1084,34 @@ class Analyse:
             print(f"Groupby Association Complete")
             print(f"{'='*70}")
             print(f"Processed {len(results)}/{len(self.groupby_subdirs)} groups successfully")
+
+        # Auto-save results for all groups
+        if results:
+            if verbosity >= 1:
+                print("\n💾 Auto-saving results for all groups...")
+            saved_count = 0
+            for group_name, group_df in results.items():
+                try:
+                    # Temporarily set associated_df to save this group
+                    original_df = self.associated_df
+                    original_folder = self.data_folder
+                    self.associated_df = group_df
+                    self.data_folder = os.path.join(original_folder, group_name)
+
+                    output_path = self.save_associated_data(verbosity=0)
+                    saved_count += 1
+                    if verbosity >= 2:
+                        print(f"   ✅ {group_name}: {output_path}")
+
+                    # Restore
+                    self.associated_df = original_df
+                    self.data_folder = original_folder
+                except Exception as e:
+                    if verbosity >= 1:
+                        print(f"   ⚠️  {group_name}: Could not save - {e}")
+
+            if verbosity >= 1:
+                print(f"💾 Saved results for {saved_count}/{len(results)} groups")
 
         return results
 

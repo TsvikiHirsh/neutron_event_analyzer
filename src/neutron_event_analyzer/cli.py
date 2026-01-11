@@ -196,6 +196,13 @@ For more information, visit: https://github.com/nuclear/neutron_event_analyzer
         default='simple',
         help='Association method for photon-event association (default: simple)'
     )
+    assoc_group.add_argument(
+        '--relax',
+        type=float,
+        metavar='FACTOR',
+        help='Scale all association parameters by this factor (e.g., 1.5 = 50%% more relaxed). '
+             'Useful for improving poor matching rates. Default: 1.0 (no scaling)'
+    )
 
     # Output options
     output_group = parser.add_argument_group('output options')
@@ -261,27 +268,7 @@ def main_assoc():
         print("=" * 70)
         print("Neutron Event Analyzer - Association Tool")
         print("=" * 70)
-
-    # Validate data folder
-    if verbosity >= 1:
         print(f"\n📁 Data folder: {args.data}")
-
-    available_data = validate_data_folder(args.data)
-
-    if verbosity >= 1:
-        print(f"\n📊 Available data types:")
-        print(f"   Events:  {'✓' if available_data['events'] else '✗'}")
-        print(f"   Photons: {'✓' if available_data['photons'] else '✗'}")
-        print(f"   Pixels:  {'✓' if available_data['pixels'] else '✗'}")
-
-    # Determine what to load
-    load_events = not args.no_events and available_data['events']
-    load_photons = not args.no_photons and available_data['photons']
-    load_pixels = not args.no_pixels and available_data['pixels']
-
-    if not (load_events or load_photons or load_pixels):
-        print("\n❌ Error: No data to load. Check your data folder structure.")
-        sys.exit(1)
 
     # Detect or use settings
     settings = args.settings
@@ -291,18 +278,15 @@ def main_assoc():
         if detected_settings:
             settings = detected_settings
             if verbosity >= 1:
-                print(f"\n⚙️  Auto-detected settings: {os.path.basename(detected_settings)}")
-        else:
-            if verbosity >= 1:
-                print("\n⚙️  Using default settings")
+                print(f"⚙️  Auto-detected settings: {os.path.basename(detected_settings)}")
     else:
         if verbosity >= 1:
             if settings in DEFAULT_PARAMS:
-                print(f"\n⚙️  Using settings preset: '{settings}'")
+                print(f"⚙️  Using settings preset: '{settings}'")
             else:
-                print(f"\n⚙️  Using settings file: {settings}")
+                print(f"⚙️  Using settings file: {settings}")
 
-    # Initialize analyzer
+    # Initialize analyzer with unified API (auto-detects groupby)
     if verbosity >= 1:
         print(f"\n🔧 Initializing analyzer...")
 
@@ -310,7 +294,8 @@ def main_assoc():
     analyser_kwargs = {
         'data_folder': args.data,
         'settings': settings,
-        'n_threads': args.threads
+        'n_threads': args.threads,
+        'verbosity': verbosity
     }
 
     # Add empir binary directory if specified (use EMPIR_PATH as fallback)
@@ -323,33 +308,34 @@ def main_assoc():
             else:
                 print(f"   Using empir binaries from: {binaries} (from $EMPIR_PATH)")
 
+    # Determine what to load (only for non-groupby folders)
+    load_events = not args.no_events
+    load_photons = not args.no_photons
+    load_pixels = not args.no_pixels
+
+    analyser_kwargs.update({
+        'events': load_events,
+        'photons': load_photons,
+        'pixels': load_pixels,
+        'limit': args.limit,
+        'query': args.query
+    })
+
     try:
         analyser = Analyse(**analyser_kwargs)
     except Exception as e:
         print(f"\n❌ Error initializing analyzer: {e}")
+        import traceback
+        if verbosity >= 2:
+            traceback.print_exc()
         sys.exit(1)
 
-    # Load data
-    if verbosity >= 1:
-        print(f"\n📥 Loading data...")
-        print(f"   Events:  {'enabled' if load_events else 'disabled'}")
-        print(f"   Photons: {'enabled' if load_photons else 'disabled'}")
-        print(f"   Pixels:  {'enabled' if load_pixels else 'disabled'}")
+    # If groupby was detected, inform user
+    if analyser.is_groupby:
+        if verbosity >= 1:
+            print(f"\n✨ Will process all groups automatically")
 
-    try:
-        analyser.load(
-            events=load_events,
-            photons=load_photons,
-            pixels=load_pixels,
-            limit=args.limit,
-            query=args.query,
-            verbosity=verbosity
-        )
-    except Exception as e:
-        print(f"\n❌ Error loading data: {e}")
-        sys.exit(1)
-
-    # Perform association
+    # Perform association using unified API
     if verbosity >= 1:
         print(f"\n🔗 Performing association...")
 
@@ -358,6 +344,10 @@ def main_assoc():
         'verbosity': verbosity,
         'method': args.method
     }
+
+    # Add relax parameter if specified
+    if hasattr(args, 'relax') and args.relax is not None:
+        assoc_params['relax'] = args.relax
 
     if args.pixel_max_dist is not None:
         assoc_params['pixel_max_dist_px'] = args.pixel_max_dist
@@ -369,23 +359,28 @@ def main_assoc():
         assoc_params['max_time_ns'] = args.max_time
 
     try:
-        if load_pixels and load_photons and load_events:
-            # Full 3-tier association
-            result = analyser.associate(**assoc_params)
-        elif load_photons and load_events:
-            # Photon-event association only
-            result = analyser.associate_photons_events(**assoc_params)
-        elif load_pixels and load_photons:
-            # Pixel-photon association only
-            result = analyser.associate(**assoc_params)
-        else:
-            print("\n❌ Error: Not enough data types loaded for association.")
-            print("   Association requires at least two data types (pixels+photons or photons+events)")
-            sys.exit(1)
+        # Use unified API - works for both single and grouped
+        results = analyser.associate(**assoc_params)
 
-        if result is None or len(result) == 0:
+        if results is None or (isinstance(results, dict) and not results):
             print("\n⚠️  Warning: Association produced no results")
             sys.exit(0)
+
+        # Generate plots automatically
+        if verbosity >= 1:
+            print(f"\n📊 Generating plots...")
+
+        try:
+            plots = analyser.plot_stats(verbosity=verbosity)
+            if isinstance(plots, dict):
+                if verbosity >= 1:
+                    print(f"✅ Generated plots for {len(plots)} groups")
+            else:
+                if verbosity >= 1:
+                    print(f"✅ Generated {len(plots)} plots")
+        except Exception as e:
+            if verbosity >= 1:
+                print(f"⚠️  Warning: Could not generate plots: {e}")
 
     except Exception as e:
         print(f"\n❌ Error during association: {e}")
