@@ -9,6 +9,7 @@ import uuid
 from scipy.spatial import cKDTree
 import logging
 import json
+from pathlib import Path
 from .config import DEFAULT_PARAMS
 
 # Check for lumacamTesting availability
@@ -24,6 +25,48 @@ logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 class Analyse:
+    @staticmethod
+    def _is_groupby_folder(folder_path):
+        """
+        Check if a folder is a groupby structure (contains subdirectories with data folders).
+
+        Args:
+            folder_path (str): Path to check
+
+        Returns:
+            tuple: (is_groupby, subdirs) where is_groupby is bool and subdirs is list of subdirectory names
+        """
+        folder = Path(folder_path)
+        if not folder.exists() or not folder.is_dir():
+            return False, []
+
+        # Check for .groupby_metadata.json file
+        if (folder / ".groupby_metadata.json").exists():
+            subdirs = [d.name for d in folder.iterdir() if d.is_dir() and not d.name.startswith('.')]
+            return True, subdirs
+
+        # Check if folder contains subdirectories that have data folders
+        subdirs = [d for d in folder.iterdir() if d.is_dir() and not d.name.startswith('.')]
+
+        if len(subdirs) < 2:
+            return False, []
+
+        # Check if subdirectories contain typical data folders
+        data_folder_names = {'ExportedEvents', 'ExportedPhotons', 'ExportedPixels',
+                            'eventFiles', 'photonFiles', 'tpx3Files'}
+
+        has_data_folders = []
+        for subdir in subdirs:
+            subdir_contents = {d.name for d in subdir.iterdir() if d.is_dir()}
+            if subdir_contents & data_folder_names:
+                has_data_folders.append(subdir.name)
+
+        # If at least 2 subdirectories have data folders, consider it a groupby structure
+        if len(has_data_folders) >= 2:
+            return True, has_data_folders
+
+        return False, []
+
     def __init__(self, data_folder, export_dir="./export", n_threads=10, use_lumacam=False, settings=None,
                  verbosity=1, events=True, photons=True, pixels=True, limit=None, query=None):
         """
@@ -77,6 +120,22 @@ class Analyse:
         self.pixels_df = None  # NEW: Pixel DataFrame
         self.associated_df = None
         self.assoc_method = None
+
+        # Check if this is a groupby folder structure
+        is_groupby, subdirs = self._is_groupby_folder(data_folder)
+        self.is_groupby = is_groupby
+        self.groupby_subdirs = subdirs if is_groupby else []
+        self.groupby_results = {}  # Store results from grouped analyses
+
+        if is_groupby:
+            if verbosity >= 1:
+                print(f"📁 Detected groupby folder structure with {len(subdirs)} groups:")
+                for subdir in subdirs:
+                    print(f"   - {subdir}")
+                print("\nℹ️  Use .associate() to run association on all groups in parallel")
+                print("    or access individual groups using: Analyse(f'{data_folder}/group_name')")
+            # Don't auto-load data for groupby folders
+            return
 
         # Auto-detect settings if not provided
         if settings is None:
@@ -738,14 +797,16 @@ class Analyse:
 
     def associate(self, pixel_max_dist_px=None, pixel_max_time_ns=None,
                   photon_time_norm_ns=1.0, photon_spatial_norm_px=1.0, photon_dSpace_px=None,
-                  max_time_ns=None, verbosity=None, method='simple'):
+                  max_time_ns=None, verbosity=None, method='simple', relax=1.0):
         """
         Perform full three-tier association: pixels → photons → events.
 
-        This method chains pixel-photon and photon-event associations. If only some data types
-        are loaded, it performs only the relevant associations. The result is stored in
-        self.associated_df as a pixel-centric, photon-centric, or event-centric dataframe
-        depending on what was loaded.
+        This method automatically handles both single folders and groupby structures:
+        - For single folders: Performs standard association and returns a DataFrame
+        - For groupby folders: Processes all groups in parallel and returns a dict of DataFrames
+
+        For single folders, the result is stored in self.associated_df as a pixel-centric,
+        photon-centric, or event-centric dataframe depending on what data was loaded.
 
         Args:
             pixel_max_dist_px (float, optional): Maximum spatial distance in pixels for pixel-photon association.
@@ -762,10 +823,29 @@ class Analyse:
                                       If None, uses instance verbosity level set in __init__.
             method (str): Association method for photon-event association ('simple', 'kdtree', 'window', 'lumacam').
                          Pixel-photon association always uses simple method.
+            relax (float): Scaling factor for association parameters. Default is 1.0 (no scaling).
+                          Values > 1.0 relax the parameters (e.g., 1.5 = 50% more relaxed),
+                          values < 1.0 make them more restrictive (e.g., 0.8 = 20% more restrictive).
+                          Applied to both pixel-photon and photon-event association parameters.
 
         Returns:
-            pd.DataFrame: The combined association dataframe (also stored in self.associated_df).
+            pd.DataFrame or dict: For single folders, returns the associated DataFrame.
+                                 For groupby folders, returns dict mapping group names to DataFrames.
         """
+        # If this is a groupby folder, delegate to associate_groupby
+        if self.is_groupby:
+            return self.associate_groupby(
+                pixel_max_dist_px=pixel_max_dist_px,
+                pixel_max_time_ns=pixel_max_time_ns,
+                photon_time_norm_ns=photon_time_norm_ns,
+                photon_spatial_norm_px=photon_spatial_norm_px,
+                photon_dSpace_px=photon_dSpace_px,
+                max_time_ns=max_time_ns,
+                verbosity=verbosity,
+                method=method,
+                relax=relax
+            )
+
         # Use instance verbosity if not specified
         if verbosity is None:
             verbosity = self.verbosity
@@ -783,17 +863,27 @@ class Analyse:
         if max_time_ns is None:
             max_time_ns = defaults.get('max_time_ns', 500)
 
+        # Apply relax scaling factor to all parameters
+        pixel_max_dist_px *= relax
+        pixel_max_time_ns *= relax
+        photon_dSpace_px *= relax
+        max_time_ns *= relax
+
         if verbosity >= 2:
             print("\n" + "="*70)
             print("Starting Full Multi-Tier Association")
             print("="*70)
             if self.settings:
                 print("Using parameters from settings file" + (" (overridden where specified)" if any([
-                    pixel_max_dist_px != defaults.get('pixel_max_dist_px'),
-                    pixel_max_time_ns != defaults.get('pixel_max_time_ns'),
-                    photon_dSpace_px != defaults.get('photon_dSpace_px'),
-                    max_time_ns != defaults.get('max_time_ns')
+                    pixel_max_dist_px != defaults.get('pixel_max_dist_px') * relax,
+                    pixel_max_time_ns != defaults.get('pixel_max_time_ns') * relax,
+                    photon_dSpace_px != defaults.get('photon_dSpace_px') * relax,
+                    max_time_ns != defaults.get('max_time_ns') * relax
                 ]) else ""))
+            if relax != 1.0:
+                print(f"Relaxation factor applied: {relax}x")
+                print(f"  Pixel-photon: max_dist={pixel_max_dist_px:.2f}px, max_time={pixel_max_time_ns:.1f}ns")
+                print(f"  Photon-event: dSpace={photon_dSpace_px:.2f}px, max_time={max_time_ns:.1f}ns")
 
         # Determine what data we have
         has_pixels = self.pixels_df is not None and len(self.pixels_df) > 0
@@ -913,6 +1003,87 @@ class Analyse:
                 print(f"Columns: {self.associated_df.columns.tolist()}")
 
         return self.associated_df
+
+    def associate_groupby(self, **kwargs):
+        """
+        Run association on all groups in a groupby folder structure in parallel.
+
+        This method processes each subdirectory as a separate Analyse instance and runs
+        association on all groups in parallel using the specified parameters.
+
+        Args:
+            **kwargs: Arguments to pass to the associate() method for each group.
+                     Common arguments: relax, method, verbosity, pixel_max_dist_px, etc.
+
+        Returns:
+            dict: Dictionary mapping group names to their associated dataframes.
+
+        Raises:
+            ValueError: If this is not a groupby folder structure.
+
+        Example:
+            assoc = nea.Analyse("archive/pencilbeam/detector_model")
+            results = assoc.associate_groupby(relax=1.5, method='simple', verbosity=1)
+            # Access results: results['intensifier_gain_50']
+        """
+        if not self.is_groupby:
+            raise ValueError("This is not a groupby folder structure. Use .associate() instead.")
+
+        verbosity = kwargs.get('verbosity', self.verbosity)
+
+        if verbosity >= 1:
+            print(f"\n{'='*70}")
+            print(f"Running Association on {len(self.groupby_subdirs)} Groups")
+            print(f"{'='*70}")
+
+        # Function to process a single group
+        def _process_group(group_name):
+            group_path = os.path.join(self.data_folder, group_name)
+            try:
+                # Create Analyse instance for this group
+                group_assoc = Analyse(
+                    group_path,
+                    export_dir=self.export_dir,
+                    n_threads=1,  # Each group uses single thread; parallelism is across groups
+                    use_lumacam=self.use_lumacam,
+                    verbosity=0  # Suppress individual group output
+                )
+
+                # Run association with provided kwargs
+                group_assoc.associate(**kwargs)
+
+                return (group_name, group_assoc.associated_df)
+            except Exception as e:
+                logger.error(f"Error processing group {group_name}: {e}")
+                return (group_name, None)
+
+        # Process groups in parallel
+        results = {}
+        with ProcessPoolExecutor(max_workers=self.n_threads) as executor:
+            futures = {executor.submit(_process_group, group_name): group_name
+                      for group_name in self.groupby_subdirs}
+
+            # Use tqdm progress bar
+            for future in tqdm(as_completed(futures), total=len(futures),
+                             desc="Processing groups", disable=(verbosity == 0)):
+                group_name, result_df = future.result()
+                if result_df is not None:
+                    results[group_name] = result_df
+                    if verbosity >= 2:
+                        print(f"✅ {group_name}: {len(result_df)} rows")
+                else:
+                    if verbosity >= 1:
+                        print(f"❌ {group_name}: Failed")
+
+        self.groupby_results = results
+
+        if verbosity >= 1:
+            print(f"\n{'='*70}")
+            print(f"Groupby Association Complete")
+            print(f"{'='*70}")
+            print(f"Processed {len(results)}/{len(self.groupby_subdirs)} groups successfully")
+
+        return results
 
     def _associate_photons_to_events(self, photons_df, events_df, weight_px_in_s, max_time_s, verbosity):
         """
