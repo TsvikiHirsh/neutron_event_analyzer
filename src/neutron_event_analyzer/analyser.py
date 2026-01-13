@@ -1728,21 +1728,70 @@ class Analyse:
             if not valid_mask.any():
                 continue
 
-            # Get valid pixel indices
+            # Get valid pixel indices and data
             valid_sub_idx = sub_idx[valid_mask]
             valid_spatial_diffs = spatial_diffs[valid_mask]
             valid_time_diffs = (sub_t[valid_mask] - phot_t) * 1e9
+            valid_x = sub_x[valid_mask]
+            valid_y = sub_y[valid_mask]
 
-            # Associate all valid pixels to this photon
-            for i, pix_idx in enumerate(valid_sub_idx):
-                # Only assign if not already assigned (first match wins)
-                if np.isnan(pixels.loc[pix_idx, 'assoc_photon_id']):
-                    pixels.loc[pix_idx, 'assoc_photon_id'] = phot_id
-                    pixels.loc[pix_idx, 'assoc_phot_x'] = phot_x
-                    pixels.loc[pix_idx, 'assoc_phot_y'] = phot_y
-                    pixels.loc[pix_idx, 'assoc_phot_t'] = phot_t
-                    pixels.loc[pix_idx, 'pixel_time_diff_ns'] = valid_time_diffs[i]
-                    pixels.loc[pix_idx, 'pixel_spatial_diff_px'] = valid_spatial_diffs[i]
+            # Filter out already assigned pixels
+            unassigned_mask = np.array([np.isnan(pixels.loc[idx, 'assoc_photon_id']) for idx in valid_sub_idx])
+            if not unassigned_mask.any():
+                continue
+
+            # Get unassigned pixels
+            unassigned_idx = valid_sub_idx[unassigned_mask]
+            unassigned_x = valid_x[unassigned_mask]
+            unassigned_y = valid_y[unassigned_mask]
+            unassigned_spatial_diffs = valid_spatial_diffs[unassigned_mask]
+            unassigned_time_diffs = valid_time_diffs[unassigned_mask]
+
+            # Find the best subset of pixels whose center of mass matches the photon
+            # Use iterative refinement: start with all, remove outliers, converge
+            best_subset_mask = np.ones(len(unassigned_idx), dtype=bool)
+
+            for iteration in range(10):  # Max 10 iterations
+                # Compute center of mass of current subset
+                com_x = unassigned_x[best_subset_mask].mean()
+                com_y = unassigned_y[best_subset_mask].mean()
+
+                # Distance from photon to center of mass
+                com_dist = np.sqrt((com_x - phot_x)**2 + (com_y - phot_y)**2)
+
+                # If CoM is close enough, we're done
+                if com_dist <= max_dist_px * 0.5:  # CoM should be within half the pixel search radius
+                    break
+
+                # Otherwise, remove pixels that are pulling CoM away from photon
+                # Calculate how much each pixel pulls the CoM
+                subset_x = unassigned_x[best_subset_mask]
+                subset_y = unassigned_y[best_subset_mask]
+
+                # Distance of each pixel from photon
+                pixel_dists_from_photon = np.sqrt((subset_x - phot_x)**2 + (subset_y - phot_y)**2)
+
+                # Remove the pixel farthest from the photon
+                if len(pixel_dists_from_photon) <= 1:
+                    break
+
+                worst_pixel_local_idx = np.argmax(pixel_dists_from_photon)
+                # Convert local index to mask index
+                mask_indices = np.where(best_subset_mask)[0]
+                best_subset_mask[mask_indices[worst_pixel_local_idx]] = False
+
+            # Assign the best subset to this photon
+            final_idx = unassigned_idx[best_subset_mask]
+            final_spatial_diffs = unassigned_spatial_diffs[best_subset_mask]
+            final_time_diffs = unassigned_time_diffs[best_subset_mask]
+
+            for i, pix_idx in enumerate(final_idx):
+                pixels.loc[pix_idx, 'assoc_photon_id'] = phot_id
+                pixels.loc[pix_idx, 'assoc_phot_x'] = phot_x
+                pixels.loc[pix_idx, 'assoc_phot_y'] = phot_y
+                pixels.loc[pix_idx, 'assoc_phot_t'] = phot_t
+                pixels.loc[pix_idx, 'pixel_time_diff_ns'] = final_time_diffs[i]
+                pixels.loc[pix_idx, 'pixel_spatial_diff_px'] = final_spatial_diffs[i]
 
         if verbosity >= 1:
             matched = pixels['assoc_photon_id'].notna().sum()
