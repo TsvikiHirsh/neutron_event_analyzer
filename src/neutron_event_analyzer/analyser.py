@@ -121,6 +121,7 @@ class Analyse:
         self.pixels_df = None  # NEW: Pixel DataFrame
         self.associated_df = None
         self.assoc_method = None
+        self.last_assoc_stats = None  # Statistics from last association
 
         # Check if this is a groupby folder structure
         is_groupby, subdirs = self._is_groupby_folder(data_folder)
@@ -1150,6 +1151,8 @@ class Analyse:
 
         # Process groups sequentially with progress bar
         results = {}
+        group_stats = []  # Collect statistics from each group
+
         for group_name in tqdm(self.groupby_subdirs, desc="Processing groups", disable=(verbosity == 0)):
             group_path = os.path.join(self.data_folder, group_name)
             try:
@@ -1172,6 +1175,10 @@ class Analyse:
 
                 results[group_name] = group_assoc.associated_df
 
+                # Collect statistics if available
+                if hasattr(group_assoc, 'last_assoc_stats') and group_assoc.last_assoc_stats:
+                    group_stats.append(group_assoc.last_assoc_stats)
+
                 if verbosity >= 2:
                     print(f"✅ {group_name}: {len(group_assoc.associated_df)} rows")
             except Exception as e:
@@ -1186,6 +1193,39 @@ class Analyse:
             print(f"Groupby Association Complete")
             print(f"{'='*70}")
             print(f"Processed {len(results)}/{len(self.groupby_subdirs)} groups successfully")
+
+            # Aggregate and display statistics from all groups
+            if group_stats:
+                total_matched_pixels = sum(s['matched_pixels'] for s in group_stats)
+                total_pixels = sum(s['total_pixels'] for s in group_stats)
+                total_matched_photons = sum(s['matched_photons'] for s in group_stats)
+                total_photons = sum(s['total_photons'] for s in group_stats)
+
+                # Aggregate CoM quality stats
+                aggregated_com = {
+                    'exact': sum(s['com_quality']['exact'] for s in group_stats),
+                    'good': sum(s['com_quality']['good'] for s in group_stats),
+                    'acceptable': sum(s['com_quality']['acceptable'] for s in group_stats),
+                    'poor': sum(s['com_quality']['poor'] for s in group_stats),
+                    'failed': sum(s['com_quality']['failed'] for s in group_stats)
+                }
+
+                print(f"\n✅ Pixel-Photon Association Results (All Groups):")
+                if total_pixels > 0:
+                    print(f"   Pixels:  {total_matched_pixels:,} / {total_pixels:,} matched ({100 * total_matched_pixels / total_pixels:.1f}%)")
+                if total_photons > 0:
+                    print(f"   Photons: {total_matched_photons:,} / {total_photons:,} matched ({100 * total_matched_photons / total_photons:.1f}%)")
+
+                # Show CoM quality statistics
+                total_processed = sum(aggregated_com.values())
+                if total_processed > 0:
+                    print(f"   Center-of-Mass Match Quality:")
+                    print(f"      Exact (≤0.1px):     {aggregated_com['exact']:,} ({100 * aggregated_com['exact'] / total_processed:.1f}%)")
+                    print(f"      Good (≤30% radius): {aggregated_com['good']:,} ({100 * aggregated_com['good'] / total_processed:.1f}%)")
+                    print(f"      Acceptable (≤50%):  {aggregated_com['acceptable']:,} ({100 * aggregated_com['acceptable'] / total_processed:.1f}%)")
+                    print(f"      Poor (≤100%):       {aggregated_com['poor']:,} ({100 * aggregated_com['poor'] / total_processed:.1f}%)")
+                    if aggregated_com['failed'] > 0:
+                        print(f"      Failed (>100%):     {aggregated_com['failed']:,} ({100 * aggregated_com['failed'] / total_processed:.1f}%)")
 
         # Auto-save results for all groups
         if results:
@@ -1791,7 +1831,7 @@ class Analyse:
                 final_com_dist = np.sqrt((final_com_x - phot_x)**2 + (final_com_y - phot_y)**2)
 
                 # Categorize CoM quality
-                if final_com_dist <= 1.0:  # Within 1 pixel
+                if final_com_dist <= 0.1:  # Within 0.1 pixel
                     com_quality_stats['exact'] += 1
                 elif final_com_dist <= max_dist_px * 0.3:  # Within 30% of search radius
                     com_quality_stats['good'] += 1
@@ -1816,15 +1856,26 @@ class Analyse:
                     pixels.loc[pix_idx, 'pixel_time_diff_ns'] = final_time_diffs[i]
                     pixels.loc[pix_idx, 'pixel_spatial_diff_px'] = final_spatial_diffs[i]
 
+        # Always compute statistics (store for later use)
+        matched_pixels = pixels['assoc_photon_id'].notna().sum()
+        total_pixels = len(pixels)
+
+        # Count how many photons were matched
+        matched_photon_ids = pixels[pixels['assoc_photon_id'].notna()]['assoc_photon_id'].unique()
+        matched_photons = len(matched_photon_ids)
+        total_photons = len(photons)
+
+        # Store statistics as instance variables
+        self.last_assoc_stats = {
+            'matched_pixels': matched_pixels,
+            'total_pixels': total_pixels,
+            'matched_photons': matched_photons,
+            'total_photons': total_photons,
+            'com_quality': com_quality_stats.copy()
+        }
+
+        # Print statistics if requested
         if verbosity >= 1:
-            matched_pixels = pixels['assoc_photon_id'].notna().sum()
-            total_pixels = len(pixels)
-
-            # Count how many photons were matched
-            matched_photon_ids = pixels[pixels['assoc_photon_id'].notna()]['assoc_photon_id'].unique()
-            matched_photons = len(matched_photon_ids)
-            total_photons = len(photons)
-
             print(f"✅ Pixel-Photon Association Results:")
             print(f"   Pixels:  {matched_pixels:,} / {total_pixels:,} matched ({100 * matched_pixels / total_pixels:.1f}%)")
             print(f"   Photons: {matched_photons:,} / {total_photons:,} matched ({100 * matched_photons / total_photons:.1f}%)")
@@ -1833,7 +1884,7 @@ class Analyse:
             total_processed = sum(com_quality_stats.values())
             if total_processed > 0:
                 print(f"   Center-of-Mass Match Quality:")
-                print(f"      Exact (≤1px):       {com_quality_stats['exact']:,} ({100 * com_quality_stats['exact'] / total_processed:.1f}%)")
+                print(f"      Exact (≤0.1px):     {com_quality_stats['exact']:,} ({100 * com_quality_stats['exact'] / total_processed:.1f}%)")
                 print(f"      Good (≤30% radius): {com_quality_stats['good']:,} ({100 * com_quality_stats['good'] / total_processed:.1f}%)")
                 print(f"      Acceptable (≤50%):  {com_quality_stats['acceptable']:,} ({100 * com_quality_stats['acceptable'] / total_processed:.1f}%)")
                 print(f"      Poor (≤100%):       {com_quality_stats['poor']:,} ({100 * com_quality_stats['poor'] / total_processed:.1f}%)")
