@@ -1699,11 +1699,15 @@ class Analyse:
         left = 0
         n_pixels_total = len(pixels)
 
+        # Track CoM quality statistics
+        com_quality_stats = {'exact': 0, 'good': 0, 'acceptable': 0, 'poor': 0, 'failed': 0}
+
         for _, phot in tqdm(photons.iterrows(), total=len(photons), desc="Associating pixels to photons", disable=(verbosity == 0)):
             phot_t, phot_x, phot_y, phot_id = phot['t'], phot['x'], phot['y'], phot['photon_id']
 
-            # Slide left to pixels with t >= phot_t - max_time_s
-            while left < n_pixels_total and pix_t[left] < phot_t - max_time_s:
+            # Slide left to pixels with t >= phot_t (photon time is the FIRST pixel time)
+            # Pixels can only come AT or AFTER the first pixel
+            while left < n_pixels_total and pix_t[left] < phot_t:
                 left += 1
 
             # Right to t <= phot_t + max_time_s
@@ -1780,18 +1784,37 @@ class Analyse:
                 mask_indices = np.where(best_subset_mask)[0]
                 best_subset_mask[mask_indices[worst_pixel_local_idx]] = False
 
+            # Compute final CoM and track quality
+            if best_subset_mask.any():
+                final_com_x = unassigned_x[best_subset_mask].mean()
+                final_com_y = unassigned_y[best_subset_mask].mean()
+                final_com_dist = np.sqrt((final_com_x - phot_x)**2 + (final_com_y - phot_y)**2)
+
+                # Categorize CoM quality
+                if final_com_dist <= 1.0:  # Within 1 pixel
+                    com_quality_stats['exact'] += 1
+                elif final_com_dist <= max_dist_px * 0.3:  # Within 30% of search radius
+                    com_quality_stats['good'] += 1
+                elif final_com_dist <= max_dist_px * 0.5:  # Within 50% of search radius
+                    com_quality_stats['acceptable'] += 1
+                elif final_com_dist <= max_dist_px:  # Within search radius
+                    com_quality_stats['poor'] += 1
+                else:
+                    com_quality_stats['failed'] += 1
+
             # Assign the best subset to this photon
             final_idx = unassigned_idx[best_subset_mask]
             final_spatial_diffs = unassigned_spatial_diffs[best_subset_mask]
             final_time_diffs = unassigned_time_diffs[best_subset_mask]
 
-            for i, pix_idx in enumerate(final_idx):
-                pixels.loc[pix_idx, 'assoc_photon_id'] = phot_id
-                pixels.loc[pix_idx, 'assoc_phot_x'] = phot_x
-                pixels.loc[pix_idx, 'assoc_phot_y'] = phot_y
-                pixels.loc[pix_idx, 'assoc_phot_t'] = phot_t
-                pixels.loc[pix_idx, 'pixel_time_diff_ns'] = final_time_diffs[i]
-                pixels.loc[pix_idx, 'pixel_spatial_diff_px'] = final_spatial_diffs[i]
+            if len(final_idx) > 0:  # Only assign if we found at least one pixel
+                for i, pix_idx in enumerate(final_idx):
+                    pixels.loc[pix_idx, 'assoc_photon_id'] = phot_id
+                    pixels.loc[pix_idx, 'assoc_phot_x'] = phot_x
+                    pixels.loc[pix_idx, 'assoc_phot_y'] = phot_y
+                    pixels.loc[pix_idx, 'assoc_phot_t'] = phot_t
+                    pixels.loc[pix_idx, 'pixel_time_diff_ns'] = final_time_diffs[i]
+                    pixels.loc[pix_idx, 'pixel_spatial_diff_px'] = final_spatial_diffs[i]
 
         if verbosity >= 1:
             matched_pixels = pixels['assoc_photon_id'].notna().sum()
@@ -1805,6 +1828,17 @@ class Analyse:
             print(f"✅ Pixel-Photon Association Results:")
             print(f"   Pixels:  {matched_pixels:,} / {total_pixels:,} matched ({100 * matched_pixels / total_pixels:.1f}%)")
             print(f"   Photons: {matched_photons:,} / {total_photons:,} matched ({100 * matched_photons / total_photons:.1f}%)")
+
+            # Show CoM quality statistics
+            total_processed = sum(com_quality_stats.values())
+            if total_processed > 0:
+                print(f"   Center-of-Mass Match Quality:")
+                print(f"      Exact (≤1px):       {com_quality_stats['exact']:,} ({100 * com_quality_stats['exact'] / total_processed:.1f}%)")
+                print(f"      Good (≤30% radius): {com_quality_stats['good']:,} ({100 * com_quality_stats['good'] / total_processed:.1f}%)")
+                print(f"      Acceptable (≤50%):  {com_quality_stats['acceptable']:,} ({100 * com_quality_stats['acceptable'] / total_processed:.1f}%)")
+                print(f"      Poor (≤100%):       {com_quality_stats['poor']:,} ({100 * com_quality_stats['poor'] / total_processed:.1f}%)")
+                if com_quality_stats['failed'] > 0:
+                    print(f"      Failed (>100%):     {com_quality_stats['failed']:,} ({100 * com_quality_stats['failed'] / total_processed:.1f}%)")
 
             if verbosity >= 2 and matched_photons > 0:
                 # Show distribution of pixels per photon
