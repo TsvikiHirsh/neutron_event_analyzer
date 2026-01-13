@@ -2910,7 +2910,7 @@ For more information, see: https://github.com/nuclear/neutron_event_analyzer
         return plot_files
 
     def plot_violin(self, y=None, groupby='photons', hue=None, title=None, time_scale=1e7,
-                    output_dir=None, figsize=(10, 6), ylim=None, verbosity=None):
+                    output_dir=None, figsize=(10, 6), ylim=None, show=True, verbosity=None):
         """
         Generate violin plots comparing distributions across grouped analyses.
 
@@ -2937,6 +2937,7 @@ For more information, see: https://github.com/nuclear/neutron_event_analyzer
             output_dir (str, optional): Output directory for plots. If None, uses 'AssociatedResults' folder.
             figsize (tuple): Figure size as (width, height). Default: (10, 6).
             ylim (tuple, optional): Y-axis limits as (ymin, ymax). If None, auto-scales.
+            show (bool): Whether to display plots inline. Default: True.
             verbosity (int, optional): Verbosity level. If None, uses instance verbosity.
 
         Returns:
@@ -3069,6 +3070,11 @@ For more information, see: https://github.com/nuclear/neutron_event_analyzer
             plot_filename = f'violin_{metric.replace(chr(92), "_")}.png'
             plot_path = os.path.join(output_dir, plot_filename)
             plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+
+            # Show plot inline if requested
+            if show:
+                plt.show()
+
             plt.close()
 
             plot_files[metric] = plot_path
