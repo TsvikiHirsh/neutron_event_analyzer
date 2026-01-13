@@ -152,16 +152,57 @@ class Analyse:
                     print(f"   - {subdir}")
                 if self.settings:
                     print(f"⚙️  Will use settings from: {self.settings_source}")
-                print("\nℹ️  Use .associate() to run association on all groups in parallel")
-                print("    or access individual groups using: Analyse(f'{data_folder}/group_name')")
-            # Don't auto-load data for groupby folders
+
+            # Try to load pre-existing association results for all groups
+            loaded_groups = []
+            for subdir in subdirs:
+                group_path = os.path.join(data_folder, subdir)
+                assoc_file = os.path.join(group_path, "AssociatedResults", "associated_data.csv")
+                if os.path.exists(assoc_file):
+                    try:
+                        group_df = pd.read_csv(assoc_file)
+                        self.groupby_results[subdir] = group_df
+                        loaded_groups.append(subdir)
+                    except Exception as e:
+                        if verbosity >= 2:
+                            print(f"⚠️  Could not load {subdir}: {e}")
+
+            if loaded_groups:
+                if verbosity >= 1:
+                    print(f"\n📂 Auto-loaded association results for {len(loaded_groups)} group(s):")
+                    for group in loaded_groups:
+                        n_rows = len(self.groupby_results[group])
+                        print(f"   ✅ {group}: {n_rows:,} rows")
+                    print("\nℹ️  You can now use plot_violin(), plot_stats(), etc. without running associate()")
+            else:
+                if verbosity >= 1:
+                    print("\nℹ️  Use .associate() to run association on all groups")
+                    print("    or access individual groups using: Analyse(f'{data_folder}/group_name')")
+
+            # Don't auto-load raw data for groupby folders
             return
 
         # Show settings info if verbosity >= 2
         if verbosity >= 2 and self.settings:
             print(f"⚙️  Using settings: {self.settings_source}")
 
-        # Auto-load data
+        # Try to load pre-existing association results
+        assoc_file = os.path.join(data_folder, "AssociatedResults", "associated_data.csv")
+        if os.path.exists(assoc_file):
+            try:
+                self.associated_df = pd.read_csv(assoc_file)
+                if verbosity >= 1:
+                    print(f"\n📂 Auto-loaded association results: {len(self.associated_df):,} rows")
+                    print("ℹ️  You can now use plot_stats(), save_associations(), etc. without running associate()")
+                    print("    To reload raw data, use .load() method")
+                # Skip loading raw data if association results exist (user can call .load() manually if needed)
+                return
+            except Exception as e:
+                if verbosity >= 2:
+                    print(f"⚠️  Could not load association results: {e}")
+                    print("    Will load raw data instead...")
+
+        # Auto-load raw data if no association results found
         self.load(events=events, photons=photons, pixels=pixels, limit=limit, query=query, verbosity=verbosity)
 
     def _load_settings(self, settings):
