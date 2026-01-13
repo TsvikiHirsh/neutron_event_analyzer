@@ -1794,9 +1794,25 @@ class Analyse:
                 pixels.loc[pix_idx, 'pixel_spatial_diff_px'] = final_spatial_diffs[i]
 
         if verbosity >= 1:
-            matched = pixels['assoc_photon_id'].notna().sum()
-            total = len(pixels)
-            print(f"✅ Matched {matched} of {total} pixels to photons ({100 * matched / total:.1f}%)")
+            matched_pixels = pixels['assoc_photon_id'].notna().sum()
+            total_pixels = len(pixels)
+
+            # Count how many photons were matched
+            matched_photon_ids = pixels[pixels['assoc_photon_id'].notna()]['assoc_photon_id'].unique()
+            matched_photons = len(matched_photon_ids)
+            total_photons = len(photons)
+
+            print(f"✅ Pixel-Photon Association Results:")
+            print(f"   Pixels:  {matched_pixels:,} / {total_pixels:,} matched ({100 * matched_pixels / total_pixels:.1f}%)")
+            print(f"   Photons: {matched_photons:,} / {total_photons:,} matched ({100 * matched_photons / total_photons:.1f}%)")
+
+            if verbosity >= 2 and matched_photons > 0:
+                # Show distribution of pixels per photon
+                pixels_per_photon = pixels[pixels['assoc_photon_id'].notna()].groupby('assoc_photon_id').size()
+                print(f"   Pixels per photon: min={pixels_per_photon.min()}, "
+                      f"mean={pixels_per_photon.mean():.1f}, "
+                      f"median={pixels_per_photon.median():.0f}, "
+                      f"max={pixels_per_photon.max()}")
 
         return pixels
 
