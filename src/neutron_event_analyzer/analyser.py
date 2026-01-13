@@ -891,7 +891,7 @@ class Analyse:
 
     def associate(self, pixel_max_dist_px=None, pixel_max_time_ns=None,
                   photon_time_norm_ns=1.0, photon_spatial_norm_px=1.0, photon_dSpace_px=None,
-                  max_time_ns=None, verbosity=None, method='simple', relax=1.0):
+                  max_time_ns=None, verbosity=None, method='simple', pixel_method='simple', relax=1.0):
         """
         Perform full three-tier association: pixels → photons → events.
 
@@ -916,7 +916,8 @@ class Analyse:
             verbosity (int, optional): Verbosity level (0=silent, 1=progress bars only, 2=detailed output).
                                       If None, uses instance verbosity level set in __init__.
             method (str): Association method for photon-event association ('simple', 'kdtree', 'window', 'lumacam').
-                         Pixel-photon association always uses simple method.
+            pixel_method (str): Association method for pixel-photon association ('simple', 'kdtree'). Default is 'simple'.
+                               Both methods use the same center-of-mass matching logic.
             relax (float): Scaling factor for association parameters. Default is 1.0 (no scaling).
                           Values > 1.0 relax the parameters (e.g., 1.5 = 50% more relaxed),
                           values < 1.0 make them more restrictive (e.g., 0.8 = 20% more restrictive).
@@ -937,6 +938,7 @@ class Analyse:
                 max_time_ns=max_time_ns,
                 verbosity=verbosity,
                 method=method,
+                pixel_method=pixel_method,
                 relax=relax
             )
 
@@ -994,13 +996,23 @@ class Analyse:
 
             # Step 1: Associate pixels to photons
             if verbosity >= 2:
-                print("\nStep 1/2: Associating pixels to photons...")
-            pixels_associated = self._associate_pixels_to_photons_simple(
-                self.pixels_df, self.photons_df,
-                max_dist_px=pixel_max_dist_px,
-                max_time_ns=pixel_max_time_ns,
-                verbosity=verbosity
-            )
+                print(f"\nStep 1/2: Associating pixels to photons (method={pixel_method})...")
+
+            # Choose pixel-photon association method
+            if pixel_method == 'kdtree':
+                pixels_associated = self._associate_pixels_to_photons_kdtree(
+                    self.pixels_df, self.photons_df,
+                    max_dist_px=pixel_max_dist_px,
+                    max_time_ns=pixel_max_time_ns,
+                    verbosity=verbosity
+                )
+            else:  # default to 'simple'
+                pixels_associated = self._associate_pixels_to_photons_simple(
+                    self.pixels_df, self.photons_df,
+                    max_dist_px=pixel_max_dist_px,
+                    max_time_ns=pixel_max_time_ns,
+                    verbosity=verbosity
+                )
 
             # Step 2: Associate photons to events
             if verbosity >= 2:
@@ -1066,13 +1078,23 @@ class Analyse:
         # Case 2: Pixels → Photons only
         elif has_pixels and has_photons:
             if verbosity >= 2:
-                print("\nPerforming 2-tier association: Pixels → Photons")
-            pixels_associated = self._associate_pixels_to_photons_simple(
-                self.pixels_df, self.photons_df,
-                max_dist_px=pixel_max_dist_px,
-                max_time_ns=pixel_max_time_ns,
-                verbosity=verbosity
-            )
+                print(f"\nPerforming 2-tier association: Pixels → Photons (method={pixel_method})")
+
+            # Choose pixel-photon association method
+            if pixel_method == 'kdtree':
+                pixels_associated = self._associate_pixels_to_photons_kdtree(
+                    self.pixels_df, self.photons_df,
+                    max_dist_px=pixel_max_dist_px,
+                    max_time_ns=pixel_max_time_ns,
+                    verbosity=verbosity
+                )
+            else:  # default to 'simple'
+                pixels_associated = self._associate_pixels_to_photons_simple(
+                    self.pixels_df, self.photons_df,
+                    max_dist_px=pixel_max_dist_px,
+                    max_time_ns=pixel_max_time_ns,
+                    verbosity=verbosity
+                )
             # Standardize column names
             self.associated_df = self._standardize_column_names(pixels_associated, verbosity=verbosity)
 
@@ -1809,6 +1831,203 @@ class Analyse:
 
                 # Otherwise, remove pixels that are pulling CoM away from photon
                 # Calculate how much each pixel pulls the CoM
+                subset_x = unassigned_x[best_subset_mask]
+                subset_y = unassigned_y[best_subset_mask]
+
+                # Distance of each pixel from photon
+                pixel_dists_from_photon = np.sqrt((subset_x - phot_x)**2 + (subset_y - phot_y)**2)
+
+                # Remove the pixel farthest from the photon
+                if len(pixel_dists_from_photon) <= 1:
+                    break
+
+                worst_pixel_local_idx = np.argmax(pixel_dists_from_photon)
+                # Convert local index to mask index
+                mask_indices = np.where(best_subset_mask)[0]
+                best_subset_mask[mask_indices[worst_pixel_local_idx]] = False
+
+            # Compute final CoM and track quality
+            if best_subset_mask.any():
+                final_com_x = unassigned_x[best_subset_mask].mean()
+                final_com_y = unassigned_y[best_subset_mask].mean()
+                final_com_dist = np.sqrt((final_com_x - phot_x)**2 + (final_com_y - phot_y)**2)
+
+                # Categorize CoM quality
+                if final_com_dist <= 0.1:  # Within 0.1 pixel
+                    com_quality_stats['exact'] += 1
+                elif final_com_dist <= max_dist_px * 0.3:  # Within 30% of search radius
+                    com_quality_stats['good'] += 1
+                elif final_com_dist <= max_dist_px * 0.5:  # Within 50% of search radius
+                    com_quality_stats['acceptable'] += 1
+                elif final_com_dist <= max_dist_px:  # Within search radius
+                    com_quality_stats['poor'] += 1
+                else:
+                    com_quality_stats['failed'] += 1
+
+            # Assign the best subset to this photon
+            final_idx = unassigned_idx[best_subset_mask]
+            final_spatial_diffs = unassigned_spatial_diffs[best_subset_mask]
+            final_time_diffs = unassigned_time_diffs[best_subset_mask]
+
+            if len(final_idx) > 0:  # Only assign if we found at least one pixel
+                for i, pix_idx in enumerate(final_idx):
+                    pixels.loc[pix_idx, 'assoc_photon_id'] = phot_id
+                    pixels.loc[pix_idx, 'assoc_phot_x'] = phot_x
+                    pixels.loc[pix_idx, 'assoc_phot_y'] = phot_y
+                    pixels.loc[pix_idx, 'assoc_phot_t'] = phot_t
+                    pixels.loc[pix_idx, 'pixel_time_diff_ns'] = final_time_diffs[i]
+                    pixels.loc[pix_idx, 'pixel_spatial_diff_px'] = final_spatial_diffs[i]
+
+        # Always compute statistics (store for later use)
+        matched_pixels = pixels['assoc_photon_id'].notna().sum()
+        total_pixels = len(pixels)
+
+        # Count how many photons were matched
+        matched_photon_ids = pixels[pixels['assoc_photon_id'].notna()]['assoc_photon_id'].unique()
+        matched_photons = len(matched_photon_ids)
+        total_photons = len(photons)
+
+        # Store statistics as instance variables
+        self.last_assoc_stats = {
+            'matched_pixels': matched_pixels,
+            'total_pixels': total_pixels,
+            'matched_photons': matched_photons,
+            'total_photons': total_photons,
+            'com_quality': com_quality_stats.copy()
+        }
+
+        # Print statistics if requested
+        if verbosity >= 1:
+            print(f"✅ Pixel-Photon Association Results:")
+            print(f"   Pixels:  {matched_pixels:,} / {total_pixels:,} matched ({100 * matched_pixels / total_pixels:.1f}%)")
+            print(f"   Photons: {matched_photons:,} / {total_photons:,} matched ({100 * matched_photons / total_photons:.1f}%)")
+
+            # Show CoM quality statistics
+            total_processed = sum(com_quality_stats.values())
+            if total_processed > 0:
+                print(f"   Center-of-Mass Match Quality:")
+                print(f"      Exact (≤0.1px):     {com_quality_stats['exact']:,} ({100 * com_quality_stats['exact'] / total_processed:.1f}%)")
+                print(f"      Good (≤30% radius): {com_quality_stats['good']:,} ({100 * com_quality_stats['good'] / total_processed:.1f}%)")
+                print(f"      Acceptable (≤50%):  {com_quality_stats['acceptable']:,} ({100 * com_quality_stats['acceptable'] / total_processed:.1f}%)")
+                print(f"      Poor (≤100%):       {com_quality_stats['poor']:,} ({100 * com_quality_stats['poor'] / total_processed:.1f}%)")
+                if com_quality_stats['failed'] > 0:
+                    print(f"      Failed (>100%):     {com_quality_stats['failed']:,} ({100 * com_quality_stats['failed'] / total_processed:.1f}%)")
+
+            if verbosity >= 2 and matched_photons > 0:
+                # Show distribution of pixels per photon
+                pixels_per_photon = pixels[pixels['assoc_photon_id'].notna()].groupby('assoc_photon_id').size()
+                print(f"   Pixels per photon: min={pixels_per_photon.min()}, "
+                      f"mean={pixels_per_photon.mean():.1f}, "
+                      f"median={pixels_per_photon.median():.0f}, "
+                      f"max={pixels_per_photon.max()}")
+
+        return pixels
+
+    def _associate_pixels_to_photons_kdtree(self, pixels_df, photons_df, max_dist_px=5.0, max_time_ns=500, verbosity=0):
+        """
+        Associate pixels to photons using kdtree for spatial queries with center-of-mass matching.
+
+        This method uses the same logic as the simple method but with a kdtree for faster
+        candidate pixel finding. For each photon:
+        1. Use kdtree to find nearby pixels within max_dist_px
+        2. Filter by time window [phot_t, phot_t + max_time_ns]
+        3. Apply iterative center-of-mass refinement
+        4. Assign only pixels whose CoM matches the photon position
+
+        Args:
+            pixels_df (pd.DataFrame): Pixel DataFrame with 'x', 'y', 't', 'tot', 'tof' columns.
+            photons_df (pd.DataFrame): Photon DataFrame with 'x', 'y', 't', 'tof' columns.
+            max_dist_px (float): Maximum spatial distance in pixels for association.
+            max_time_ns (float): Maximum time difference in nanoseconds for association.
+            verbosity (int): Verbosity level (0=silent, 1=summary, 2=debug).
+
+        Returns:
+            pd.DataFrame: Pixel DataFrame with added association columns.
+        """
+        if pixels_df is None or photons_df is None or len(pixels_df) == 0 or len(photons_df) == 0:
+            if verbosity >= 1:
+                print("Warning: Empty pixels or photons dataframe, skipping pixel-photon association")
+            return pixels_df
+
+        pixels = pixels_df.copy()
+        photons = photons_df.copy()
+
+        # Initialize association columns
+        pixels['assoc_photon_id'] = np.nan
+        pixels['assoc_phot_x'] = np.nan
+        pixels['assoc_phot_y'] = np.nan
+        pixels['assoc_phot_t'] = np.nan
+        pixels['pixel_time_diff_ns'] = np.nan
+        pixels['pixel_spatial_diff_px'] = np.nan
+
+        # Sort by time
+        pixels = pixels.sort_values('t').reset_index(drop=True)
+        photons = photons.sort_values('t').reset_index(drop=True)
+        photons['photon_id'] = photons.index + 1
+
+        # Build kdtree for pixel spatial coordinates
+        pixel_coords = np.column_stack([pixels['x'].to_numpy(), pixels['y'].to_numpy()])
+        pixel_tree = cKDTree(pixel_coords)
+
+        max_time_s = max_time_ns / 1e9
+
+        # Track CoM quality statistics
+        com_quality_stats = {'exact': 0, 'good': 0, 'acceptable': 0, 'poor': 0, 'failed': 0}
+
+        for _, phot in tqdm(photons.iterrows(), total=len(photons), desc="Associating pixels to photons (kdtree)", disable=(verbosity == 0)):
+            phot_t, phot_x, phot_y, phot_id = phot['t'], phot['x'], phot['y'], phot['photon_id']
+
+            # Use kdtree to find all pixels within spatial radius
+            candidate_indices = pixel_tree.query_ball_point([phot_x, phot_y], max_dist_px)
+
+            if len(candidate_indices) == 0:
+                continue
+
+            # Filter by time window: [phot_t, phot_t + max_time_s]
+            # Photon time is the FIRST pixel time, so pixels can only come AT or AFTER
+            candidate_pixels = pixels.iloc[candidate_indices]
+            time_mask = (candidate_pixels['t'] >= phot_t) & (candidate_pixels['t'] <= phot_t + max_time_s)
+
+            if not time_mask.any():
+                continue
+
+            # Get pixels in time and spatial window
+            valid_pixels = candidate_pixels[time_mask]
+            valid_indices = np.array(candidate_indices)[time_mask.to_numpy()]
+
+            # Filter out already assigned pixels
+            unassigned_mask = valid_pixels['assoc_photon_id'].isna().to_numpy()
+            if not unassigned_mask.any():
+                continue
+
+            # Get unassigned pixels
+            unassigned_idx = valid_indices[unassigned_mask]
+            unassigned_pixels = valid_pixels[unassigned_mask]
+            unassigned_x = unassigned_pixels['x'].to_numpy()
+            unassigned_y = unassigned_pixels['y'].to_numpy()
+            unassigned_t = unassigned_pixels['t'].to_numpy()
+
+            # Calculate spatial and time differences
+            unassigned_spatial_diffs = np.sqrt((unassigned_x - phot_x)**2 + (unassigned_y - phot_y)**2)
+            unassigned_time_diffs = (unassigned_t - phot_t) * 1e9
+
+            # Find the best subset of pixels whose center of mass matches the photon
+            # Use iterative refinement: start with all, remove outliers, converge
+            best_subset_mask = np.ones(len(unassigned_idx), dtype=bool)
+
+            for iteration in range(10):  # Max 10 iterations
+                # Compute center of mass of current subset
+                com_x = unassigned_x[best_subset_mask].mean()
+                com_y = unassigned_y[best_subset_mask].mean()
+
+                # Distance from photon to center of mass
+                com_dist = np.sqrt((com_x - phot_x)**2 + (com_y - phot_y)**2)
+
+                # If CoM is close enough, we're done
+                if com_dist <= max_dist_px * 0.5:  # CoM should be within half the pixel search radius
+                    break
+
+                # Otherwise, remove pixels that are pulling CoM away from photon
                 subset_x = unassigned_x[best_subset_mask]
                 subset_y = unassigned_y[best_subset_mask]
 
@@ -2646,5 +2865,251 @@ For more information, see: https://github.com/nuclear/neutron_event_analyzer
             for i, path in enumerate(plot_files, 1):
                 print(f"   {i}. {os.path.basename(path)}")
             print(f"\n📁 Plots saved to: {output_dir}")
-        
+
         return plot_files
+
+    def plot_violin(self, y=None, groupby='photons', hue=None, title=None, time_scale=1e7,
+                    output_dir=None, figsize=(10, 6), ylim=None, verbosity=None):
+        """
+        Generate violin plots comparing distributions across grouped analyses.
+
+        This method computes per-photon statistics (e.g., std of pixel properties) and creates
+        violin plots to compare distributions across different groups.
+
+        Args:
+            y (str or list): Column(s) to plot. Options include:
+                           - 'px\\x': std of pixel x-coordinates per photon
+                           - 'px\\y': std of pixel y-coordinates per photon
+                           - 'px\\tot': std of pixel time-over-threshold per photon
+                           - 'px\\toa': std of pixel time-of-arrival per photon (scaled by time_scale)
+                           - 'px\\n': number of pixels per photon (count)
+                           If None, plots all available metrics.
+                           Can be a string for single metric or list for multiple.
+            groupby (str): What to group by. Options:
+                          - 'photons': Compute statistics per photon (default)
+                          Currently only 'photons' is supported.
+            hue (str, optional): For groupby folders, the hue variable for the violin plot.
+                               Typically the group name (e.g., 'detector_model').
+                               If None, uses 'group' as the hue variable.
+            title (str, optional): Plot title. If None, generates automatic title.
+            time_scale (float): Scale factor for time columns (default: 1e7 for ~100ns units).
+            output_dir (str, optional): Output directory for plots. If None, uses 'AssociatedResults' folder.
+            figsize (tuple): Figure size as (width, height). Default: (10, 6).
+            ylim (tuple, optional): Y-axis limits as (ymin, ymax). If None, auto-scales.
+            verbosity (int, optional): Verbosity level. If None, uses instance verbosity.
+
+        Returns:
+            str or dict: For single folder, returns the plot file path.
+                        For groupby folders, returns dict with metric names as keys and plot paths as values.
+
+        Raises:
+            ValueError: If no association data is available or if unsupported groupby option.
+
+        Example:
+            # Grouped analysis with violin plot
+            assoc = nea.Analyse("archive/pencilbeam1/detector_model/")
+            assoc.associate(relax=1.5)
+            assoc.plot_violin(y="px\\toa", title="Pixel time spread per photon")
+
+            # Plot multiple metrics
+            assoc.plot_violin(y=["px\\x", "px\\y", "px\\tot"], ylim=(-1, 5))
+        """
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        import pandas as pd
+
+        # Use instance verbosity if not specified
+        if verbosity is None:
+            verbosity = self.verbosity if self.verbosity is not None else 1
+
+        if groupby != 'photons':
+            raise ValueError(f"Currently only groupby='photons' is supported, got '{groupby}'")
+
+        # Determine if we have grouped data
+        if not self.is_groupby or not self.groupby_results:
+            raise ValueError("Violin plots require grouped analysis data. Use associate() on a groupby folder first.")
+
+        # Define available metrics
+        available_metrics = {
+            'px\\x': ('px\\x', 'std', 'Pixel X std (px)'),
+            'px\\y': ('px\\y', 'std', 'Pixel Y std (px)'),
+            'px\\tot': ('px\\tot', 'std', 'Pixel ToT std (s)'),
+            'px\\n': ('ph\\id', 'count', 'Pixels per photon'),
+            'px\\toa': ('px\\toa', 'std', f'Pixel ToA std ({1e9/time_scale:.0f}ns)')
+        }
+
+        # Handle y parameter
+        if y is None:
+            metrics_to_plot = list(available_metrics.keys())
+        elif isinstance(y, str):
+            metrics_to_plot = [y]
+        else:
+            metrics_to_plot = list(y)
+
+        # Validate metrics
+        for metric in metrics_to_plot:
+            if metric not in available_metrics:
+                raise ValueError(f"Unknown metric '{metric}'. Available: {list(available_metrics.keys())}")
+
+        # Set output directory
+        if output_dir is None:
+            output_dir = os.path.join(self.data_folder, "AssociatedResults")
+        os.makedirs(output_dir, exist_ok=True)
+
+        if verbosity >= 1:
+            print(f"\n📊 Generating violin plots for {len(metrics_to_plot)} metric(s)...")
+
+        plot_files = {}
+
+        # Process each metric
+        for metric in metrics_to_plot:
+            col, agg_func, ylabel = available_metrics[metric]
+
+            # Collect data from all groups
+            all_data = []
+            for group_name, group_df in self.groupby_results.items():
+                if 'ph\\id' not in group_df.columns:
+                    if verbosity >= 1:
+                        print(f"⚠️  Skipping {group_name}: no ph\\id column found")
+                    continue
+
+                if col not in group_df.columns and metric != 'px\\n':
+                    if verbosity >= 1:
+                        print(f"⚠️  Skipping {group_name}: column {col} not found")
+                    continue
+
+                # Compute per-photon statistics
+                if agg_func == 'std':
+                    if metric == 'px\\toa':
+                        stats = group_df.groupby('ph\\id')[col].std() * time_scale
+                    else:
+                        stats = group_df.groupby('ph\\id')[col].std()
+                elif agg_func == 'count':
+                    stats = group_df.groupby('ph\\id')[col].count()
+
+                # Create dataframe with group label
+                df_metric = pd.DataFrame({
+                    'value': stats.values,
+                    hue if hue else 'group': group_name
+                })
+                all_data.append(df_metric)
+
+            if not all_data:
+                if verbosity >= 1:
+                    print(f"⚠️  No data available for metric {metric}")
+                continue
+
+            # Combine all groups
+            combined_df = pd.concat(all_data, ignore_index=True)
+
+            # Create violin plot
+            plt.figure(figsize=figsize)
+            sns.violinplot(data=combined_df, y='value', x=hue if hue else 'group',
+                          split=False, inner="quart")
+
+            # Set labels and title
+            plt.ylabel(ylabel, fontsize=12)
+            plt.xlabel(hue if hue else 'Group', fontsize=12)
+            if title:
+                plt.title(title, fontsize=13, fontweight='bold')
+            else:
+                plt.title(f'{ylabel} - Comparison across groups', fontsize=13, fontweight='bold')
+
+            # Set y-axis limits if provided
+            if ylim is not None:
+                plt.ylim(ylim)
+
+            # Rotate x-axis labels if needed
+            plt.xticks(rotation=45, ha='right')
+
+            plt.tight_layout()
+
+            # Save plot
+            plot_filename = f'violin_{metric.replace(chr(92), "_")}.png'
+            plot_path = os.path.join(output_dir, plot_filename)
+            plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+            plt.close()
+
+            plot_files[metric] = plot_path
+
+            if verbosity >= 2:
+                print(f"✅ Generated {plot_filename}")
+
+        if verbosity >= 1:
+            print(f"\n✅ Generated {len(plot_files)} violin plot(s)")
+            print(f"📁 Plots saved to: {output_dir}")
+
+        return plot_files if len(plot_files) > 1 else (list(plot_files.values())[0] if plot_files else None)
+
+    def get_violin_stats(self, time_scale=1e7):
+        r"""
+        Compute per-photon statistics for all groups (helper method for violin plots).
+
+        This method computes the same statistics as plot_violin() but returns them as
+        a dictionary of DataFrames for inspection or custom plotting.
+
+        Args:
+            time_scale (float): Scale factor for time columns (default: 1e7 for ~100ns units).
+
+        Returns:
+            dict: Dictionary mapping group names to DataFrames with per-photon statistics.
+                  Each DataFrame has columns: px\x, px\y, px\tot, px\n, px\toa
+
+        Raises:
+            ValueError: If no grouped association data is available.
+
+        Example:
+            assoc = nea.Analyse("archive/pencilbeam1/detector_model/")
+            assoc.associate(relax=1.5)
+            stats = assoc.get_violin_stats()
+
+            # Access specific group
+            full_physics_stats = stats['full_physics']
+            print(full_physics_stats['px\\x'].describe())  # Stats for pixel x std per photon
+        """
+        import pandas as pd
+
+        if not self.is_groupby or not self.groupby_results:
+            raise ValueError("This method requires grouped analysis data. Use associate() on a groupby folder first.")
+
+        all_stats = {}
+
+        for group_name, group_df in self.groupby_results.items():
+            if 'ph\\id' not in group_df.columns:
+                continue
+
+            # Compute per-photon statistics (same as violin_analysis)
+            stats_list = []
+            col_names = []
+
+            # px\x std
+            if 'px\\x' in group_df.columns:
+                stats_list.append(group_df.groupby('ph\\id')['px\\x'].std())
+                col_names.append('px\\x')
+
+            # px\y std
+            if 'px\\y' in group_df.columns:
+                stats_list.append(group_df.groupby('ph\\id')['px\\y'].std())
+                col_names.append('px\\y')
+
+            # px\tot std
+            if 'px\\tot' in group_df.columns:
+                stats_list.append(group_df.groupby('ph\\id')['px\\tot'].std())
+                col_names.append('px\\tot')
+
+            # px\n count
+            stats_list.append(group_df.groupby('ph\\id')['ph\\id'].count())
+            col_names.append('px\\n')
+
+            # px\toa std (scaled)
+            if 'px\\toa' in group_df.columns:
+                stats_list.append(group_df.groupby('ph\\id')['px\\toa'].std() * time_scale)
+                col_names.append(f'px\\toa [{1e9/time_scale:.0f}ns]')
+
+            # Combine into DataFrame
+            if stats_list:
+                stats_df = pd.concat(stats_list, axis=1)
+                stats_df.columns = pd.Index(col_names)
+                all_stats[group_name] = stats_df
+
+        return all_stats
