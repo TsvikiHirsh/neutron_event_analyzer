@@ -3167,17 +3167,27 @@ For more information, see: https://github.com/nuclear/neutron_event_analyzer
         - Grouped data: Compares same metric across different groups
 
         Args:
-            y (str or list): Column(s) to plot. Options include:
+            y (str or list): Column(s) to plot. Options depend on groupby:
+
+                           For groupby='photons' (default):
                            - 'px\x': std of pixel x-coordinates per photon
                            - 'px\y': std of pixel y-coordinates per photon
                            - 'px\tot': std of pixel time-over-threshold per photon
-                           - 'px\toa': std of pixel time-of-arrival per photon (scaled by time_scale)
+                           - 'px\toa': std of pixel time-of-arrival per photon (scaled)
                            - 'px\n': number of pixels per photon (count)
-                           If None, plots all available metrics.
+
+                           For groupby='events':
+                           - 'ph\x': std of photon x-coordinates per event
+                           - 'ph\y': std of photon y-coordinates per event
+                           - 'ph\n': number of photons per event (count)
+                           - 'ph\toa': std of photon time-of-arrival per event (scaled)
+                           - 'ev\psd': event PSD value (mean)
+
+                           If None, plots all available metrics for chosen groupby.
                            Can be a string for single metric or list for multiple.
             groupby (str): What to group by. Options:
                           - 'photons': Compute statistics per photon (default)
-                          Currently only 'photons' is supported.
+                          - 'events': Compute statistics per event
             hue (str, optional): For groupby folders, the hue variable for the violin plot.
                                Typically the group name (e.g., 'detector_model').
                                If None, uses 'group' as the hue variable.
@@ -3198,13 +3208,19 @@ For more information, see: https://github.com/nuclear/neutron_event_analyzer
             ValueError: If no association data is available or if unsupported groupby option.
 
         Example:
-            # Single data - compare metrics side-by-side
+            # Single data - compare per-photon metrics side-by-side
             assoc = nea.Analyse("run112_ZnS/ZnS")
-            assoc.plot_violin()  # Shows all metrics
+            assoc.plot_violin(groupby='photons')  # Default
 
-            # Grouped analysis - compare across groups
+            # Single data - compare per-event metrics
+            assoc.plot_violin(groupby='events')
+
+            # Grouped analysis - compare photon stats across groups
             assoc = nea.Analyse("archive/pencilbeam1/detector_model/")
             assoc.plot_violin(y="px\\toa", title="Pixel time spread per photon")
+
+            # Grouped analysis - compare event stats across groups
+            assoc.plot_violin(groupby='events', y="ph\\n", title="Photons per event")
 
             # Plot multiple metrics with custom limits
             assoc.plot_violin(y=["px\\x", "px\\y", "px\\tot"], ylim=(-1, 5))
@@ -3217,8 +3233,8 @@ For more information, see: https://github.com/nuclear/neutron_event_analyzer
         if verbosity is None:
             verbosity = self.verbosity if self.verbosity is not None else 1
 
-        if groupby != 'photons':
-            raise ValueError(f"Currently only groupby='photons' is supported, got '{groupby}'")
+        if groupby not in ['photons', 'events']:
+            raise ValueError(f"groupby must be 'photons' or 'events', got '{groupby}'")
 
         # Determine if we have grouped data or single data
         is_grouped = self.is_groupby and bool(self.groupby_results)
@@ -3228,14 +3244,25 @@ For more information, see: https://github.com/nuclear/neutron_event_analyzer
             if self.associated_df is None or len(self.associated_df) == 0:
                 raise ValueError("No association data available. Run associate() first or load a folder with association results.")
 
-        # Define available metrics
-        available_metrics = {
-            'px\\x': ('px\\x', 'std', 'Pixel X std (px)'),
-            'px\\y': ('px\\y', 'std', 'Pixel Y std (px)'),
-            'px\\tot': ('px\\tot', 'std', 'Pixel ToT std (s)'),
-            'px\\n': ('ph\\id', 'count', 'Pixels per photon'),
-            'px\\toa': ('px\\toa', 'std', f'Pixel ToA std ({1e9/time_scale:.0f}ns)')
-        }
+        # Define available metrics based on groupby
+        if groupby == 'photons':
+            available_metrics = {
+                'px\\x': ('px\\x', 'std', 'Pixel X std (px)'),
+                'px\\y': ('px\\y', 'std', 'Pixel Y std (px)'),
+                'px\\tot': ('px\\tot', 'std', 'Pixel ToT std (s)'),
+                'px\\n': ('ph\\id', 'count', 'Pixels per photon'),
+                'px\\toa': ('px\\toa', 'std', f'Pixel ToA std ({1e9/time_scale:.0f}ns)')
+            }
+            group_col = 'ph\\id'
+        else:  # groupby == 'events'
+            available_metrics = {
+                'ph\\x': ('ph\\x', 'std', 'Photon X std (px)'),
+                'ph\\y': ('ph\\y', 'std', 'Photon Y std (px)'),
+                'ph\\n': ('ev\\id', 'count', 'Photons per event'),
+                'ph\\toa': ('ph\\toa', 'std', f'Photon ToA std ({1e9/time_scale:.0f}ns)'),
+                'ev\\psd': ('ev\\psd', 'mean', 'Event PSD')
+            }
+            group_col = 'ev\\id'
 
         # Handle y parameter
         if y is None:
@@ -3268,24 +3295,30 @@ For more information, see: https://github.com/nuclear/neutron_event_analyzer
                 # Collect data from all groups
                 all_data = []
                 for group_name, group_df in self.groupby_results.items():
-                    if 'ph\\id' not in group_df.columns:
+                    if group_col not in group_df.columns:
                         if verbosity >= 1:
-                            print(f"⚠️  Skipping {group_name}: no ph\\id column found")
+                            print(f"⚠️  Skipping {group_name}: no {group_col} column found")
                         continue
 
-                    if col not in group_df.columns and metric != 'px\\n':
+                    # Check if metric column is needed and exists
+                    if agg_func == 'count':
+                        # For count, we just need the group column
+                        pass
+                    elif col not in group_df.columns:
                         if verbosity >= 1:
                             print(f"⚠️  Skipping {group_name}: column {col} not found")
                         continue
 
-                    # Compute per-photon statistics
+                    # Compute statistics based on aggregation function
                     if agg_func == 'std':
-                        if metric == 'px\\toa':
-                            stats = group_df.groupby('ph\\id')[col].std() * time_scale
+                        if metric in ['px\\toa', 'ph\\toa']:
+                            stats = group_df.groupby(group_col)[col].std() * time_scale
                         else:
-                            stats = group_df.groupby('ph\\id')[col].std()
+                            stats = group_df.groupby(group_col)[col].std()
                     elif agg_func == 'count':
-                        stats = group_df.groupby('ph\\id')[col].count()
+                        stats = group_df.groupby(group_col)[col].count()
+                    elif agg_func == 'mean':
+                        stats = group_df.groupby(group_col)[col].mean()
 
                     # Create dataframe with group label
                     df_metric = pd.DataFrame({
@@ -3345,27 +3378,33 @@ For more information, see: https://github.com/nuclear/neutron_event_analyzer
             df = self.associated_df
 
             # Check for required column
-            if 'ph\\id' not in df.columns:
-                raise ValueError("No 'ph\\id' column found in association data. Cannot compute per-photon statistics.")
+            if group_col not in df.columns:
+                raise ValueError(f"No '{group_col}' column found in association data. Cannot compute {groupby} statistics.")
 
             # Compute all metrics
             all_metric_data = []
             for metric in metrics_to_plot:
                 col, agg_func, ylabel = available_metrics[metric]
 
-                if col not in df.columns and metric != 'px\\n':
+                # Check if metric column is needed and exists
+                if agg_func == 'count':
+                    # For count, we just need the group column
+                    pass
+                elif col not in df.columns:
                     if verbosity >= 1:
                         print(f"⚠️  Skipping {metric}: column {col} not found")
                     continue
 
-                # Compute per-photon statistics
+                # Compute statistics based on aggregation function
                 if agg_func == 'std':
-                    if metric == 'px\\toa':
-                        stats = df.groupby('ph\\id')[col].std() * time_scale
+                    if metric in ['px\\toa', 'ph\\toa']:
+                        stats = df.groupby(group_col)[col].std() * time_scale
                     else:
-                        stats = df.groupby('ph\\id')[col].std()
+                        stats = df.groupby(group_col)[col].std()
                 elif agg_func == 'count':
-                    stats = df.groupby('ph\\id')[col].count()
+                    stats = df.groupby(group_col)[col].count()
+                elif agg_func == 'mean':
+                    stats = df.groupby(group_col)[col].mean()
 
                 # Add to combined data
                 for value in stats.values:
@@ -3392,7 +3431,8 @@ For more information, see: https://github.com/nuclear/neutron_event_analyzer
             if title:
                 plt.title(title, fontsize=13, fontweight='bold')
             else:
-                plt.title('Per-Photon Statistics Distribution', fontsize=13, fontweight='bold')
+                default_title = f'Per-{groupby.capitalize()[:-1]} Statistics Distribution'
+                plt.title(default_title, fontsize=13, fontweight='bold')
 
             # Set y-axis limits if provided
             if ylim is not None:
@@ -3425,19 +3465,21 @@ For more information, see: https://github.com/nuclear/neutron_event_analyzer
 
         return plot_files if len(plot_files) > 1 else (list(plot_files.values())[0] if plot_files else None)
 
-    def get_violin_stats(self, time_scale=1e7):
+    def get_violin_stats(self, groupby='photons', time_scale=1e7):
         r"""
-        Compute per-photon statistics for all groups (helper method for violin plots).
+        Compute per-photon or per-event statistics for all groups (helper method for violin plots).
 
         This method computes the same statistics as plot_violin() but returns them as
         a dictionary of DataFrames for inspection or custom plotting.
 
         Args:
+            groupby (str): What to group by: 'photons' (default) or 'events'.
             time_scale (float): Scale factor for time columns (default: 1e7 for ~100ns units).
 
         Returns:
-            dict: Dictionary mapping group names to DataFrames with per-photon statistics.
-                  Each DataFrame has columns: px\x, px\y, px\tot, px\n, px\toa
+            dict: Dictionary mapping group names to DataFrames with statistics.
+                  For groupby='photons': columns are px\x, px\y, px\tot, px\n, px\toa
+                  For groupby='events': columns are ph\x, ph\y, ph\n, ph\toa, ev\psd
 
         Raises:
             ValueError: If no grouped association data is available.
@@ -3445,50 +3487,84 @@ For more information, see: https://github.com/nuclear/neutron_event_analyzer
         Example:
             assoc = nea.Analyse("archive/pencilbeam1/detector_model/")
             assoc.associate(relax=1.5)
-            stats = assoc.get_violin_stats()
 
-            # Access specific group
-            full_physics_stats = stats['full_physics']
-            print(full_physics_stats['px\\x'].describe())  # Stats for pixel x std per photon
+            # Get per-photon statistics
+            photon_stats = assoc.get_violin_stats(groupby='photons')
+            print(photon_stats['full_physics']['px\\x'].describe())
+
+            # Get per-event statistics
+            event_stats = assoc.get_violin_stats(groupby='events')
+            print(event_stats['full_physics']['ph\\n'].describe())
         """
         import pandas as pd
 
         if not self.is_groupby or not self.groupby_results:
             raise ValueError("This method requires grouped analysis data. Use associate() on a groupby folder first.")
 
+        if groupby not in ['photons', 'events']:
+            raise ValueError(f"groupby must be 'photons' or 'events', got '{groupby}'")
+
         all_stats = {}
+        group_col = 'ph\\id' if groupby == 'photons' else 'ev\\id'
 
         for group_name, group_df in self.groupby_results.items():
-            if 'ph\\id' not in group_df.columns:
+            if group_col not in group_df.columns:
                 continue
 
-            # Compute per-photon statistics (same as violin_analysis)
             stats_list = []
             col_names = []
 
-            # px\x std
-            if 'px\\x' in group_df.columns:
-                stats_list.append(group_df.groupby('ph\\id')['px\\x'].std())
-                col_names.append('px\\x')
+            if groupby == 'photons':
+                # Compute per-photon statistics
+                # px\x std
+                if 'px\\x' in group_df.columns:
+                    stats_list.append(group_df.groupby(group_col)['px\\x'].std())
+                    col_names.append('px\\x')
 
-            # px\y std
-            if 'px\\y' in group_df.columns:
-                stats_list.append(group_df.groupby('ph\\id')['px\\y'].std())
-                col_names.append('px\\y')
+                # px\y std
+                if 'px\\y' in group_df.columns:
+                    stats_list.append(group_df.groupby(group_col)['px\\y'].std())
+                    col_names.append('px\\y')
 
-            # px\tot std
-            if 'px\\tot' in group_df.columns:
-                stats_list.append(group_df.groupby('ph\\id')['px\\tot'].std())
-                col_names.append('px\\tot')
+                # px\tot std
+                if 'px\\tot' in group_df.columns:
+                    stats_list.append(group_df.groupby(group_col)['px\\tot'].std())
+                    col_names.append('px\\tot')
 
-            # px\n count
-            stats_list.append(group_df.groupby('ph\\id')['ph\\id'].count())
-            col_names.append('px\\n')
+                # px\n count
+                stats_list.append(group_df.groupby(group_col)[group_col].count())
+                col_names.append('px\\n')
 
-            # px\toa std (scaled)
-            if 'px\\toa' in group_df.columns:
-                stats_list.append(group_df.groupby('ph\\id')['px\\toa'].std() * time_scale)
-                col_names.append(f'px\\toa [{1e9/time_scale:.0f}ns]')
+                # px\toa std (scaled)
+                if 'px\\toa' in group_df.columns:
+                    stats_list.append(group_df.groupby(group_col)['px\\toa'].std() * time_scale)
+                    col_names.append(f'px\\toa [{1e9/time_scale:.0f}ns]')
+
+            else:  # groupby == 'events'
+                # Compute per-event statistics
+                # ph\x std
+                if 'ph\\x' in group_df.columns:
+                    stats_list.append(group_df.groupby(group_col)['ph\\x'].std())
+                    col_names.append('ph\\x')
+
+                # ph\y std
+                if 'ph\\y' in group_df.columns:
+                    stats_list.append(group_df.groupby(group_col)['ph\\y'].std())
+                    col_names.append('ph\\y')
+
+                # ph\n count
+                stats_list.append(group_df.groupby(group_col)[group_col].count())
+                col_names.append('ph\\n')
+
+                # ph\toa std (scaled)
+                if 'ph\\toa' in group_df.columns:
+                    stats_list.append(group_df.groupby(group_col)['ph\\toa'].std() * time_scale)
+                    col_names.append(f'ph\\toa [{1e9/time_scale:.0f}ns]')
+
+                # ev\psd mean
+                if 'ev\\psd' in group_df.columns:
+                    stats_list.append(group_df.groupby(group_col)['ev\\psd'].mean())
+                    col_names.append('ev\\psd')
 
             # Combine into DataFrame
             if stats_list:
