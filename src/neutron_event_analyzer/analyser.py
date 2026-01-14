@@ -121,7 +121,8 @@ class Analyse:
         self.pixels_df = None  # NEW: Pixel DataFrame
         self.associated_df = None
         self.assoc_method = None
-        self.last_assoc_stats = None  # Statistics from last association
+        self.last_assoc_stats = None  # Statistics from last pixel-photon association
+        self.last_photon_event_stats = None  # Statistics from last photon-event association
 
         # Check if this is a groupby folder structure
         is_groupby, subdirs = self._is_groupby_folder(data_folder)
@@ -1214,7 +1215,8 @@ class Analyse:
 
         # Process groups sequentially with progress bar
         results = {}
-        group_stats = []  # Collect statistics from each group
+        group_stats = []  # Collect pixel-photon statistics from each group
+        group_pe_stats = []  # Collect photon-event statistics from each group
 
         for group_name in tqdm(self.groupby_subdirs, desc="Processing groups", disable=(verbosity == 0)):
             group_path = os.path.join(self.data_folder, group_name)
@@ -1238,9 +1240,13 @@ class Analyse:
 
                 results[group_name] = group_assoc.associated_df
 
-                # Collect statistics if available
+                # Collect pixel-photon statistics if available
                 if hasattr(group_assoc, 'last_assoc_stats') and group_assoc.last_assoc_stats:
                     group_stats.append(group_assoc.last_assoc_stats)
+
+                # Collect photon-event statistics if available
+                if hasattr(group_assoc, 'last_photon_event_stats') and group_assoc.last_photon_event_stats:
+                    group_pe_stats.append(group_assoc.last_photon_event_stats)
 
                 if verbosity >= 2:
                     print(f"✅ {group_name}: {len(group_assoc.associated_df)} rows")
@@ -1289,6 +1295,43 @@ class Analyse:
                     print(f"      Poor (≤100%):       {aggregated_com['poor']:,} ({100 * aggregated_com['poor'] / total_processed:.1f}%)")
                     if aggregated_com['failed'] > 0:
                         print(f"      Failed (>100%):     {aggregated_com['failed']:,} ({100 * aggregated_com['failed'] / total_processed:.1f}%)")
+
+            # Aggregate and display photon-event statistics
+            if group_pe_stats:
+                total_matched_photons_pe = sum(s['matched_photons'] for s in group_pe_stats)
+                total_photons_pe = sum(s['total_photons'] for s in group_pe_stats)
+                total_matched_events = sum(s['matched_events'] for s in group_pe_stats)
+                total_events = sum(s['total_events'] for s in group_pe_stats)
+
+                # Aggregate quality stats
+                aggregated_quality = {
+                    'exact_n': sum(s['quality']['exact_n'] for s in group_pe_stats),
+                    'n_mismatch': sum(s['quality']['n_mismatch'] for s in group_pe_stats),
+                    'exact_com': sum(s['quality']['exact_com'] for s in group_pe_stats),
+                    'good_com': sum(s['quality']['good_com'] for s in group_pe_stats),
+                    'acceptable_com': sum(s['quality']['acceptable_com'] for s in group_pe_stats),
+                    'poor_com': sum(s['quality']['poor_com'] for s in group_pe_stats)
+                }
+
+                print(f"\n✅ Photon-Event Association Results (All Groups):")
+                if total_photons_pe > 0:
+                    print(f"   Photons: {total_matched_photons_pe:,} / {total_photons_pe:,} matched ({100 * total_matched_photons_pe / total_photons_pe:.1f}%)")
+                if total_events > 0:
+                    print(f"   Events:  {total_matched_events:,} / {total_events:,} matched ({100 * total_matched_events / total_events:.1f}%)")
+
+                # Show quality statistics
+                matched_events_total = aggregated_quality['exact_n'] + aggregated_quality['n_mismatch']
+                if matched_events_total > 0:
+                    print(f"   Association Quality:")
+                    print(f"      Photon count matches ev\\n: {aggregated_quality['exact_n']:,} ({100 * aggregated_quality['exact_n'] / matched_events_total:.1f}%)")
+                    if aggregated_quality['n_mismatch'] > 0:
+                        print(f"      Photon count mismatch:     {aggregated_quality['n_mismatch']:,} ({100 * aggregated_quality['n_mismatch'] / matched_events_total:.1f}%)")
+                    print(f"   Center-of-Mass Match Quality:")
+                    print(f"      Exact (≤0.1px):     {aggregated_quality['exact_com']:,} ({100 * aggregated_quality['exact_com'] / matched_events_total:.1f}%)")
+                    print(f"      Good (≤30% radius): {aggregated_quality['good_com']:,} ({100 * aggregated_quality['good_com'] / matched_events_total:.1f}%)")
+                    print(f"      Acceptable (≤50%):  {aggregated_quality['acceptable_com']:,} ({100 * aggregated_quality['acceptable_com'] / matched_events_total:.1f}%)")
+                    if aggregated_quality['poor_com'] > 0:
+                        print(f"      Poor (>50%):        {aggregated_quality['poor_com']:,} ({100 * aggregated_quality['poor_com'] / matched_events_total:.1f}%)")
 
         # Auto-save results for all groups
         if results:
@@ -1502,8 +1545,75 @@ class Analyse:
                                 photons.loc[idx, 'spatial_diff_px'] = spatial_diff.iloc[diff_idx]
                                 photons.loc[idx, 'assoc_com_dist'] = com_dist
                                 photons.loc[idx, 'assoc_status'] = 'cog_match'
-        
+
         photons['assoc_status'] = photons['assoc_status'].astype('category')
+
+        # Compute and store statistics
+        matched_photons = photons['assoc_event_id'].notna().sum()
+        total_photons = len(photons)
+
+        # Count how many events were matched
+        matched_event_ids = photons[photons['assoc_event_id'].notna()]['assoc_event_id'].unique()
+        matched_events = len(matched_event_ids)
+        total_events = len(events)
+
+        # Quality metrics
+        quality_stats = {'exact_n': 0, 'n_mismatch': 0, 'exact_com': 0, 'good_com': 0,
+                        'acceptable_com': 0, 'poor_com': 0}
+
+        # For each matched event, check quality
+        for event_id in matched_event_ids:
+            event_photons = photons[photons['assoc_event_id'] == event_id]
+            actual_n = len(event_photons)
+
+            # Get predicted n from first photon's assoc_n
+            predicted_n = int(event_photons.iloc[0]['assoc_n'])
+
+            # Check if photon count matches prediction
+            if actual_n == predicted_n:
+                quality_stats['exact_n'] += 1
+            else:
+                quality_stats['n_mismatch'] += 1
+
+            # Check CoM distance quality (from first photon)
+            com_dist = event_photons.iloc[0]['assoc_com_dist']
+            if com_dist <= 0.1:  # Within 0.1 pixel
+                quality_stats['exact_com'] += 1
+            elif com_dist <= dSpace_px * 0.3:  # Within 30% of search radius
+                quality_stats['good_com'] += 1
+            elif com_dist <= dSpace_px * 0.5:  # Within 50% of search radius
+                quality_stats['acceptable_com'] += 1
+            else:  # Within search radius but >50%
+                quality_stats['poor_com'] += 1
+
+        # Store statistics as instance variable
+        self.last_photon_event_stats = {
+            'matched_photons': matched_photons,
+            'total_photons': total_photons,
+            'matched_events': matched_events,
+            'total_events': total_events,
+            'quality': quality_stats
+        }
+
+        # Print statistics if requested
+        if verbosity >= 1:
+            print(f"✅ Photon-Event Association Results:")
+            print(f"   Photons: {matched_photons:,} / {total_photons:,} matched ({100 * matched_photons / total_photons:.1f}%)")
+            print(f"   Events:  {matched_events:,} / {total_events:,} matched ({100 * matched_events / total_events:.1f}%)")
+
+            # Show quality statistics
+            if matched_events > 0:
+                print(f"   Association Quality:")
+                print(f"      Photon count matches ev\\n: {quality_stats['exact_n']:,} ({100 * quality_stats['exact_n'] / matched_events:.1f}%)")
+                if quality_stats['n_mismatch'] > 0:
+                    print(f"      Photon count mismatch:     {quality_stats['n_mismatch']:,} ({100 * quality_stats['n_mismatch'] / matched_events:.1f}%)")
+                print(f"   Center-of-Mass Match Quality:")
+                print(f"      Exact (≤0.1px):     {quality_stats['exact_com']:,} ({100 * quality_stats['exact_com'] / matched_events:.1f}%)")
+                print(f"      Good (≤30% radius): {quality_stats['good_com']:,} ({100 * quality_stats['good_com'] / matched_events:.1f}%)")
+                print(f"      Acceptable (≤50%):  {quality_stats['acceptable_com']:,} ({100 * quality_stats['acceptable_com'] / matched_events:.1f}%)")
+                if quality_stats['poor_com'] > 0:
+                    print(f"      Poor (>50%):        {quality_stats['poor_com']:,} ({100 * quality_stats['poor_com'] / matched_events:.1f}%)")
+
         return photons
 
     def _associate_photons_to_events_window(
@@ -1642,6 +1752,73 @@ class Analyse:
                                 photons.loc[idx, 'assoc_status'] = 'cog_match'
 
         photons['assoc_status'] = photons['assoc_status'].astype('category')
+
+        # Compute and store statistics
+        matched_photons = photons['assoc_event_id'].notna().sum()
+        total_photons = len(photons)
+
+        # Count how many events were matched
+        matched_event_ids = photons[photons['assoc_event_id'].notna()]['assoc_event_id'].unique()
+        matched_events = len(matched_event_ids)
+        total_events = len(events)
+
+        # Quality metrics
+        quality_stats = {'exact_n': 0, 'n_mismatch': 0, 'exact_com': 0, 'good_com': 0,
+                        'acceptable_com': 0, 'poor_com': 0}
+
+        # For each matched event, check quality
+        for event_id in matched_event_ids:
+            event_photons = photons[photons['assoc_event_id'] == event_id]
+            actual_n = len(event_photons)
+
+            # Get predicted n from first photon's assoc_n
+            predicted_n = int(event_photons.iloc[0]['assoc_n'])
+
+            # Check if photon count matches prediction
+            if actual_n == predicted_n:
+                quality_stats['exact_n'] += 1
+            else:
+                quality_stats['n_mismatch'] += 1
+
+            # Check CoM distance quality (from first photon)
+            com_dist = event_photons.iloc[0]['assoc_com_dist']
+            if com_dist <= 0.1:  # Within 0.1 pixel
+                quality_stats['exact_com'] += 1
+            elif com_dist <= dSpace_px * 0.3:  # Within 30% of search radius
+                quality_stats['good_com'] += 1
+            elif com_dist <= dSpace_px * 0.5:  # Within 50% of search radius
+                quality_stats['acceptable_com'] += 1
+            else:  # Within search radius but >50%
+                quality_stats['poor_com'] += 1
+
+        # Store statistics as instance variable
+        self.last_photon_event_stats = {
+            'matched_photons': matched_photons,
+            'total_photons': total_photons,
+            'matched_events': matched_events,
+            'total_events': total_events,
+            'quality': quality_stats
+        }
+
+        # Print statistics if requested
+        if verbosity >= 1:
+            print(f"✅ Photon-Event Association Results:")
+            print(f"   Photons: {matched_photons:,} / {total_photons:,} matched ({100 * matched_photons / total_photons:.1f}%)")
+            print(f"   Events:  {matched_events:,} / {total_events:,} matched ({100 * matched_events / total_events:.1f}%)")
+
+            # Show quality statistics
+            if matched_events > 0:
+                print(f"   Association Quality:")
+                print(f"      Photon count matches ev\\n: {quality_stats['exact_n']:,} ({100 * quality_stats['exact_n'] / matched_events:.1f}%)")
+                if quality_stats['n_mismatch'] > 0:
+                    print(f"      Photon count mismatch:     {quality_stats['n_mismatch']:,} ({100 * quality_stats['n_mismatch'] / matched_events:.1f}%)")
+                print(f"   Center-of-Mass Match Quality:")
+                print(f"      Exact (≤0.1px):     {quality_stats['exact_com']:,} ({100 * quality_stats['exact_com'] / matched_events:.1f}%)")
+                print(f"      Good (≤30% radius): {quality_stats['good_com']:,} ({100 * quality_stats['good_com'] / matched_events:.1f}%)")
+                print(f"      Acceptable (≤50%):  {quality_stats['acceptable_com']:,} ({100 * quality_stats['acceptable_com'] / matched_events:.1f}%)")
+                if quality_stats['poor_com'] > 0:
+                    print(f"      Poor (>50%):        {quality_stats['poor_com']:,} ({100 * quality_stats['poor_com'] / matched_events:.1f}%)")
+
         return photons
 
     def _associate_photons_to_events_simple_window(
@@ -1753,6 +1930,73 @@ class Analyse:
                     photons.loc[loc_idx, 'assoc_status'] = 'cog_match'
 
         photons['assoc_status'] = photons['assoc_status'].astype('category')
+
+        # Compute and store statistics
+        matched_photons = photons['assoc_event_id'].notna().sum()
+        total_photons = len(photons)
+
+        # Count how many events were matched
+        matched_event_ids = photons[photons['assoc_event_id'].notna()]['assoc_event_id'].unique()
+        matched_events = len(matched_event_ids)
+        total_events = len(events)
+
+        # Quality metrics
+        quality_stats = {'exact_n': 0, 'n_mismatch': 0, 'exact_com': 0, 'good_com': 0,
+                        'acceptable_com': 0, 'poor_com': 0}
+
+        # For each matched event, check quality
+        for event_id in matched_event_ids:
+            event_photons = photons[photons['assoc_event_id'] == event_id]
+            actual_n = len(event_photons)
+
+            # Get predicted n from first photon's assoc_n
+            predicted_n = int(event_photons.iloc[0]['assoc_n'])
+
+            # Check if photon count matches prediction
+            if actual_n == predicted_n:
+                quality_stats['exact_n'] += 1
+            else:
+                quality_stats['n_mismatch'] += 1
+
+            # Check CoM distance quality (from first photon)
+            com_dist = event_photons.iloc[0]['assoc_com_dist']
+            if com_dist <= 0.1:  # Within 0.1 pixel
+                quality_stats['exact_com'] += 1
+            elif com_dist <= dSpace_px * 0.3:  # Within 30% of search radius
+                quality_stats['good_com'] += 1
+            elif com_dist <= dSpace_px * 0.5:  # Within 50% of search radius
+                quality_stats['acceptable_com'] += 1
+            else:  # Within search radius but >50%
+                quality_stats['poor_com'] += 1
+
+        # Store statistics as instance variable
+        self.last_photon_event_stats = {
+            'matched_photons': matched_photons,
+            'total_photons': total_photons,
+            'matched_events': matched_events,
+            'total_events': total_events,
+            'quality': quality_stats
+        }
+
+        # Print statistics if requested
+        if verbosity >= 1:
+            print(f"✅ Photon-Event Association Results:")
+            print(f"   Photons: {matched_photons:,} / {total_photons:,} matched ({100 * matched_photons / total_photons:.1f}%)")
+            print(f"   Events:  {matched_events:,} / {total_events:,} matched ({100 * matched_events / total_events:.1f}%)")
+
+            # Show quality statistics
+            if matched_events > 0:
+                print(f"   Association Quality:")
+                print(f"      Photon count matches ev\\n: {quality_stats['exact_n']:,} ({100 * quality_stats['exact_n'] / matched_events:.1f}%)")
+                if quality_stats['n_mismatch'] > 0:
+                    print(f"      Photon count mismatch:     {quality_stats['n_mismatch']:,} ({100 * quality_stats['n_mismatch'] / matched_events:.1f}%)")
+                print(f"   Center-of-Mass Match Quality:")
+                print(f"      Exact (≤0.1px):     {quality_stats['exact_com']:,} ({100 * quality_stats['exact_com'] / matched_events:.1f}%)")
+                print(f"      Good (≤30% radius): {quality_stats['good_com']:,} ({100 * quality_stats['good_com'] / matched_events:.1f}%)")
+                print(f"      Acceptable (≤50%):  {quality_stats['acceptable_com']:,} ({100 * quality_stats['acceptable_com'] / matched_events:.1f}%)")
+                if quality_stats['poor_com'] > 0:
+                    print(f"      Poor (>50%):        {quality_stats['poor_com']:,} ({100 * quality_stats['poor_com'] / matched_events:.1f}%)")
+
         return photons
 
     def _associate_pixels_to_photons_simple(self, pixels_df, photons_df, max_dist_px=5.0, max_time_ns=500, verbosity=0):
