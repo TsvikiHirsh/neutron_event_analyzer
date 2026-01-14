@@ -189,22 +189,25 @@ class Analyse:
 
         # Try to load pre-existing association results
         assoc_file = os.path.join(data_folder, "AssociatedResults", "associated_data.csv")
+        loaded_assoc_results = False
         if os.path.exists(assoc_file):
             try:
                 self.associated_df = pd.read_csv(assoc_file)
+                loaded_assoc_results = True
                 if verbosity >= 1:
                     print(f"\n📂 Auto-loaded association results: {len(self.associated_df):,} rows")
-                    print("ℹ️  You can now use plot_stats(), save_associations(), etc. without running associate()")
-                    print("    To reload raw data, use .load() method")
-                # Skip loading raw data if association results exist (user can call .load() manually if needed)
-                return
             except Exception as e:
                 if verbosity >= 2:
                     print(f"⚠️  Could not load association results: {e}")
-                    print("    Will load raw data instead...")
 
-        # Auto-load raw data if no association results found
-        self.load(events=events, photons=photons, pixels=pixels, limit=limit, query=query, verbosity=verbosity)
+        # Always load raw data (so user can re-run association or use different methods)
+        # If any data type is requested (events, photons, or pixels)
+        if events or photons or pixels:
+            if loaded_assoc_results and verbosity >= 1:
+                print("📥 Loading raw data for re-analysis...")
+            self.load(events=events, photons=photons, pixels=pixels, limit=limit, query=query, verbosity=verbosity)
+        elif loaded_assoc_results and verbosity >= 1:
+            print("ℹ️  Raw data not loaded. To re-run association, use .load() to load raw data first.")
 
     def _load_settings(self, settings):
         """
