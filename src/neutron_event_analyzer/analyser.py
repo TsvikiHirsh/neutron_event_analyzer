@@ -3158,19 +3158,21 @@ For more information, see: https://github.com/nuclear/neutron_event_analyzer
 
     def plot_violin(self, y=None, groupby='photons', hue=None, title=None, time_scale=1e7,
                     output_dir=None, figsize=(10, 6), ylim=None, show=True, verbosity=None):
-        """
-        Generate violin plots comparing distributions across grouped analyses.
+        r"""
+        Generate violin plots of per-photon statistics.
 
         This method computes per-photon statistics (e.g., std of pixel properties) and creates
-        violin plots to compare distributions across different groups.
+        violin plots. Works with both single and grouped data:
+        - Single data: Shows distribution of multiple metrics side-by-side
+        - Grouped data: Compares same metric across different groups
 
         Args:
             y (str or list): Column(s) to plot. Options include:
-                           - 'px\\x': std of pixel x-coordinates per photon
-                           - 'px\\y': std of pixel y-coordinates per photon
-                           - 'px\\tot': std of pixel time-over-threshold per photon
-                           - 'px\\toa': std of pixel time-of-arrival per photon (scaled by time_scale)
-                           - 'px\\n': number of pixels per photon (count)
+                           - 'px\x': std of pixel x-coordinates per photon
+                           - 'px\y': std of pixel y-coordinates per photon
+                           - 'px\tot': std of pixel time-over-threshold per photon
+                           - 'px\toa': std of pixel time-of-arrival per photon (scaled by time_scale)
+                           - 'px\n': number of pixels per photon (count)
                            If None, plots all available metrics.
                            Can be a string for single metric or list for multiple.
             groupby (str): What to group by. Options:
@@ -3179,6 +3181,7 @@ For more information, see: https://github.com/nuclear/neutron_event_analyzer
             hue (str, optional): For groupby folders, the hue variable for the violin plot.
                                Typically the group name (e.g., 'detector_model').
                                If None, uses 'group' as the hue variable.
+                               Ignored for single data.
             title (str, optional): Plot title. If None, generates automatic title.
             time_scale (float): Scale factor for time columns (default: 1e7 for ~100ns units).
             output_dir (str, optional): Output directory for plots. If None, uses 'AssociatedResults' folder.
@@ -3195,12 +3198,15 @@ For more information, see: https://github.com/nuclear/neutron_event_analyzer
             ValueError: If no association data is available or if unsupported groupby option.
 
         Example:
-            # Grouped analysis with violin plot
+            # Single data - compare metrics side-by-side
+            assoc = nea.Analyse("run112_ZnS/ZnS")
+            assoc.plot_violin()  # Shows all metrics
+
+            # Grouped analysis - compare across groups
             assoc = nea.Analyse("archive/pencilbeam1/detector_model/")
-            assoc.associate(relax=1.5)
             assoc.plot_violin(y="px\\toa", title="Pixel time spread per photon")
 
-            # Plot multiple metrics
+            # Plot multiple metrics with custom limits
             assoc.plot_violin(y=["px\\x", "px\\y", "px\\tot"], ylim=(-1, 5))
         """
         import matplotlib.pyplot as plt
@@ -3214,9 +3220,13 @@ For more information, see: https://github.com/nuclear/neutron_event_analyzer
         if groupby != 'photons':
             raise ValueError(f"Currently only groupby='photons' is supported, got '{groupby}'")
 
-        # Determine if we have grouped data
-        if not self.is_groupby or not self.groupby_results:
-            raise ValueError("Violin plots require grouped analysis data. Use associate() on a groupby folder first.")
+        # Determine if we have grouped data or single data
+        is_grouped = self.is_groupby and bool(self.groupby_results)
+
+        # Check if we have any data at all
+        if not is_grouped:
+            if self.associated_df is None or len(self.associated_df) == 0:
+                raise ValueError("No association data available. Run associate() first or load a folder with association results.")
 
         # Define available metrics
         available_metrics = {
@@ -3250,59 +3260,139 @@ For more information, see: https://github.com/nuclear/neutron_event_analyzer
 
         plot_files = {}
 
-        # Process each metric
-        for metric in metrics_to_plot:
-            col, agg_func, ylabel = available_metrics[metric]
+        if is_grouped:
+            # GROUPED MODE: Plot each metric, comparing across groups
+            for metric in metrics_to_plot:
+                col, agg_func, ylabel = available_metrics[metric]
 
-            # Collect data from all groups
-            all_data = []
-            for group_name, group_df in self.groupby_results.items():
-                if 'ph\\id' not in group_df.columns:
+                # Collect data from all groups
+                all_data = []
+                for group_name, group_df in self.groupby_results.items():
+                    if 'ph\\id' not in group_df.columns:
+                        if verbosity >= 1:
+                            print(f"⚠️  Skipping {group_name}: no ph\\id column found")
+                        continue
+
+                    if col not in group_df.columns and metric != 'px\\n':
+                        if verbosity >= 1:
+                            print(f"⚠️  Skipping {group_name}: column {col} not found")
+                        continue
+
+                    # Compute per-photon statistics
+                    if agg_func == 'std':
+                        if metric == 'px\\toa':
+                            stats = group_df.groupby('ph\\id')[col].std() * time_scale
+                        else:
+                            stats = group_df.groupby('ph\\id')[col].std()
+                    elif agg_func == 'count':
+                        stats = group_df.groupby('ph\\id')[col].count()
+
+                    # Create dataframe with group label
+                    df_metric = pd.DataFrame({
+                        'value': stats.values,
+                        hue if hue else 'group': group_name
+                    })
+                    all_data.append(df_metric)
+
+                if not all_data:
                     if verbosity >= 1:
-                        print(f"⚠️  Skipping {group_name}: no ph\\id column found")
+                        print(f"⚠️  No data available for metric {metric}")
                     continue
 
-                if col not in group_df.columns and metric != 'px\\n':
+                # Combine all groups
+                combined_df = pd.concat(all_data, ignore_index=True)
+
+                # Create violin plot
+                plt.figure(figsize=figsize)
+                sns.violinplot(data=combined_df, y='value', x=hue if hue else 'group',
+                              split=False, inner="quart")
+
+                # Set labels and title
+                plt.ylabel(ylabel, fontsize=12)
+                plt.xlabel(hue if hue else 'Group', fontsize=12)
+                if title:
+                    plt.title(title, fontsize=13, fontweight='bold')
+                else:
+                    plt.title(f'{ylabel} - Comparison across groups', fontsize=13, fontweight='bold')
+
+                # Set y-axis limits if provided
+                if ylim is not None:
+                    plt.ylim(ylim)
+
+                # Rotate x-axis labels if needed
+                plt.xticks(rotation=45, ha='right')
+
+                plt.tight_layout()
+
+                # Save plot
+                plot_filename = f'violin_{metric.replace(chr(92), "_")}.png'
+                plot_path = os.path.join(output_dir, plot_filename)
+                plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+
+                # Show plot inline if requested
+                if show:
+                    plt.show()
+
+                plt.close()
+
+                plot_files[metric] = plot_path
+
+                if verbosity >= 2:
+                    print(f"✅ Generated {plot_filename}")
+
+        else:
+            # SINGLE MODE: Plot all metrics side-by-side for one dataset
+            df = self.associated_df
+
+            # Check for required column
+            if 'ph\\id' not in df.columns:
+                raise ValueError("No 'ph\\id' column found in association data. Cannot compute per-photon statistics.")
+
+            # Compute all metrics
+            all_metric_data = []
+            for metric in metrics_to_plot:
+                col, agg_func, ylabel = available_metrics[metric]
+
+                if col not in df.columns and metric != 'px\\n':
                     if verbosity >= 1:
-                        print(f"⚠️  Skipping {group_name}: column {col} not found")
+                        print(f"⚠️  Skipping {metric}: column {col} not found")
                     continue
 
                 # Compute per-photon statistics
                 if agg_func == 'std':
                     if metric == 'px\\toa':
-                        stats = group_df.groupby('ph\\id')[col].std() * time_scale
+                        stats = df.groupby('ph\\id')[col].std() * time_scale
                     else:
-                        stats = group_df.groupby('ph\\id')[col].std()
+                        stats = df.groupby('ph\\id')[col].std()
                 elif agg_func == 'count':
-                    stats = group_df.groupby('ph\\id')[col].count()
+                    stats = df.groupby('ph\\id')[col].count()
 
-                # Create dataframe with group label
-                df_metric = pd.DataFrame({
-                    'value': stats.values,
-                    hue if hue else 'group': group_name
-                })
-                all_data.append(df_metric)
+                # Add to combined data
+                for value in stats.values:
+                    all_metric_data.append({
+                        'metric': ylabel,
+                        'value': value
+                    })
 
-            if not all_data:
+            if not all_metric_data:
                 if verbosity >= 1:
-                    print(f"⚠️  No data available for metric {metric}")
-                continue
+                    print(f"⚠️  No data available for any metrics")
+                return None
 
-            # Combine all groups
-            combined_df = pd.concat(all_data, ignore_index=True)
+            # Create dataframe for plotting
+            plot_df = pd.DataFrame(all_metric_data)
 
-            # Create violin plot
+            # Create single violin plot with all metrics
             plt.figure(figsize=figsize)
-            sns.violinplot(data=combined_df, y='value', x=hue if hue else 'group',
-                          split=False, inner="quart")
+            sns.violinplot(data=plot_df, x='metric', y='value', split=False, inner="quart")
 
             # Set labels and title
-            plt.ylabel(ylabel, fontsize=12)
-            plt.xlabel(hue if hue else 'Group', fontsize=12)
+            plt.ylabel('Value', fontsize=12)
+            plt.xlabel('Metric', fontsize=12)
             if title:
                 plt.title(title, fontsize=13, fontweight='bold')
             else:
-                plt.title(f'{ylabel} - Comparison across groups', fontsize=13, fontweight='bold')
+                plt.title('Per-Photon Statistics Distribution', fontsize=13, fontweight='bold')
 
             # Set y-axis limits if provided
             if ylim is not None:
@@ -3314,7 +3404,7 @@ For more information, see: https://github.com/nuclear/neutron_event_analyzer
             plt.tight_layout()
 
             # Save plot
-            plot_filename = f'violin_{metric.replace(chr(92), "_")}.png'
+            plot_filename = 'violin_all_metrics.png'
             plot_path = os.path.join(output_dir, plot_filename)
             plt.savefig(plot_path, dpi=150, bbox_inches='tight')
 
@@ -3324,7 +3414,7 @@ For more information, see: https://github.com/nuclear/neutron_event_analyzer
 
             plt.close()
 
-            plot_files[metric] = plot_path
+            plot_files['all_metrics'] = plot_path
 
             if verbosity >= 2:
                 print(f"✅ Generated {plot_filename}")
