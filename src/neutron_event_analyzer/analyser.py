@@ -1376,17 +1376,48 @@ class Analyse:
         return html
 
     def _extract_row_metrics(self, stats):
-        """Extract metrics from stats dict for a table row."""
+        """Extract metrics from stats dict for a table row.
+
+        Returns dict with:
+        - pix_count: "matched / total" formatted string
+        - pix_pct: percentage value
+        - phot_px2ph_count: "matched / total" formatted string
+        - phot_px2ph_pct: percentage value
+        - phot_ph2ev_count: "matched / total" formatted string
+        - phot_ph2ev_pct: percentage value
+        - evt_count: "matched / total" formatted string
+        - evt_pct: percentage value
+        - com_exact_px2ph: percentage value
+        - com_good_px2ph: percentage value
+        - com_exact_ph2ev: percentage value
+        - com_good_ph2ev: percentage value
+        """
         metrics = {}
+
+        def format_count(matched, total):
+            """Format count as 'matched / total' with thousands separators."""
+            return f"{matched:,} / {total:,}"
 
         if isinstance(stats, dict):
             # Handle combined stats (single dataset)
             if 'pixel_photon' in stats and stats['pixel_photon']:
                 pxph = stats['pixel_photon']
+
+                # Pixel → Photon: Pixels count and %
                 if 'matched_pixels' in pxph and 'total_pixels' in pxph:
-                    metrics['pix_match'] = 100 * pxph['matched_pixels'] / pxph['total_pixels']
+                    matched_pix = pxph['matched_pixels']
+                    total_pix = pxph['total_pixels']
+                    metrics['pix_count'] = format_count(matched_pix, total_pix)
+                    metrics['pix_pct'] = 100 * matched_pix / total_pix if total_pix > 0 else 0
+
+                # Pixel → Photon: Photons count and %
                 if 'matched_photons' in pxph and 'total_photons' in pxph:
-                    metrics['phot_match'] = 100 * pxph['matched_photons'] / pxph['total_photons']
+                    matched_phot = pxph['matched_photons']
+                    total_phot = pxph['total_photons']
+                    metrics['phot_px2ph_count'] = format_count(matched_phot, total_phot)
+                    metrics['phot_px2ph_pct'] = 100 * matched_phot / total_phot if total_phot > 0 else 0
+
+                # CoM Quality px2ph
                 if 'com_quality' in pxph:
                     total_com = sum(pxph['com_quality'].values())
                     if total_com > 0:
@@ -1395,8 +1426,22 @@ class Analyse:
 
             if 'photon_event' in stats and stats['photon_event']:
                 phev = stats['photon_event']
+
+                # Photon → Event: Photons count and %
+                if 'matched_photons' in phev and 'total_photons' in phev:
+                    matched_phot = phev['matched_photons']
+                    total_phot = phev['total_photons']
+                    metrics['phot_ph2ev_count'] = format_count(matched_phot, total_phot)
+                    metrics['phot_ph2ev_pct'] = 100 * matched_phot / total_phot if total_phot > 0 else 0
+
+                # Photon → Event: Events count and %
                 if 'matched_events' in phev and 'total_events' in phev:
-                    metrics['evt_match'] = 100 * phev['matched_events'] / phev['total_events']
+                    matched_evt = phev['matched_events']
+                    total_evt = phev['total_events']
+                    metrics['evt_count'] = format_count(matched_evt, total_evt)
+                    metrics['evt_pct'] = 100 * matched_evt / total_evt if total_evt > 0 else 0
+
+                # CoM Quality ph2ev
                 if 'quality' in phev:
                     qual = phev['quality']
                     total_qual = qual.get('exact_n', 0) + qual.get('n_mismatch', 0)
@@ -1404,18 +1449,39 @@ class Analyse:
                         metrics['com_exact_ph2ev'] = 100 * qual.get('exact_com', 0) / total_qual
                         metrics['com_good_ph2ev'] = 100 * qual.get('good_com', 0) / total_qual
 
-            # Handle direct stats (from groupby)
-            if 'matched_pixels' in stats:
-                metrics['pix_match'] = 100 * stats['matched_pixels'] / stats['total_pixels']
-            if 'matched_photons' in stats:
-                metrics['phot_match'] = 100 * stats['matched_photons'] / stats['total_photons']
-            if 'matched_events' in stats:
-                metrics['evt_match'] = 100 * stats['matched_events'] / stats['total_events']
+            # Handle direct stats (from groupby) - same structure
+            if 'matched_pixels' in stats and 'total_pixels' in stats:
+                matched_pix = stats['matched_pixels']
+                total_pix = stats['total_pixels']
+                metrics['pix_count'] = format_count(matched_pix, total_pix)
+                metrics['pix_pct'] = 100 * matched_pix / total_pix if total_pix > 0 else 0
+
+            if 'matched_photons' in stats and 'total_photons' in stats:
+                matched_phot = stats['matched_photons']
+                total_phot = stats['total_photons']
+                # This is for px2ph stage
+                metrics['phot_px2ph_count'] = format_count(matched_phot, total_phot)
+                metrics['phot_px2ph_pct'] = 100 * matched_phot / total_phot if total_phot > 0 else 0
+
+            if 'matched_events' in stats and 'total_events' in stats:
+                matched_evt = stats['matched_events']
+                total_evt = stats['total_events']
+                metrics['evt_count'] = format_count(matched_evt, total_evt)
+                metrics['evt_pct'] = 100 * matched_evt / total_evt if total_evt > 0 else 0
+
+                # For ph2ev, photons count comes from the events data
+                # We need to infer photons from the same stats
+                if 'phot_ph2ev_count' not in metrics:
+                    # Use matched_photons if available from ph2ev stage
+                    metrics['phot_ph2ev_count'] = format_count(matched_phot, total_phot) if 'matched_photons' in stats else "—"
+                    metrics['phot_ph2ev_pct'] = 100 * matched_phot / total_phot if ('matched_photons' in stats and total_phot > 0) else 0
+
             if 'com_quality' in stats:
                 total_com = sum(stats['com_quality'].values())
                 if total_com > 0:
                     metrics['com_exact_px2ph'] = 100 * stats['com_quality'].get('exact', 0) / total_com
                     metrics['com_good_px2ph'] = 100 * stats['com_quality'].get('good', 0) / total_com
+
             if 'quality' in stats:
                 qual = stats['quality']
                 total_qual = qual.get('exact_n', 0) + qual.get('n_mismatch', 0)
