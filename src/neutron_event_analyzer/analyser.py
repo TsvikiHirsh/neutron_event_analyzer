@@ -1254,7 +1254,7 @@ class Analyse:
         rows_data = []
 
         if self.is_groupby and self.groupby_results:
-            # Multiple rows for grouped data
+            # Multiple rows for grouped data - use group names
             for group_name in self.groupby_results.keys():
                 row = {'Group': group_name}
 
@@ -1265,8 +1265,10 @@ class Analyse:
 
                 rows_data.append(row)
         else:
-            # Single row for single dataset
-            row = {'Group': 'Dataset'}
+            # Single row for single dataset - use folder name
+            import os
+            folder_name = os.path.basename(self.data_folder)
+            row = {'Group': folder_name}
             if self.last_assoc_stats or self.last_photon_event_stats:
                 combined_stats = {
                     'pixel_photon': self.last_assoc_stats,
@@ -1278,20 +1280,33 @@ class Analyse:
         if not rows_data or all(len(row) == 1 for row in rows_data):
             return "<p><em>No association data available. Run associate() first.</em></p>"
 
-        # Build HTML table
+        # Build HTML table with multiindex-style headers
         html = """
         <div style="font-family: Arial, sans-serif; font-size: 0.85em;">
             <table style="border-collapse: collapse; width: 100%; border: 1px solid #ddd;">
                 <thead>
-                    <tr style="background-color: #4CAF50; color: white;">
-                        <th style="padding: 8px; border: 1px solid #ddd; text-align: left;">Group</th>
-                        <th style="padding: 8px; border: 1px solid #ddd; text-align: center;">Pix Match</th>
-                        <th style="padding: 8px; border: 1px solid #ddd; text-align: center;">Phot Match</th>
-                        <th style="padding: 8px; border: 1px solid #ddd; text-align: center;">Evt Match</th>
-                        <th style="padding: 8px; border: 1px solid #ddd; text-align: center;">CoM Exact (px2ph)</th>
-                        <th style="padding: 8px; border: 1px solid #ddd; text-align: center;">CoM Good (px2ph)</th>
-                        <th style="padding: 8px; border: 1px solid #ddd; text-align: center;">CoM Exact (ph2ev)</th>
-                        <th style="padding: 8px; border: 1px solid #ddd; text-align: center;">CoM Good (ph2ev)</th>
+                    <!-- Top level headers (category grouping) -->
+                    <tr style="background-color: white; border-bottom: 2px solid #ddd;">
+                        <th rowspan="2" style="padding: 8px; border: 1px solid #ddd; text-align: left; font-weight: bold;">Group</th>
+                        <th colspan="4" style="padding: 8px; border: 1px solid #ddd; text-align: center; font-weight: bold; border-bottom: 1px solid #999;">Pixel → Photon</th>
+                        <th colspan="4" style="padding: 8px; border: 1px solid #ddd; text-align: center; font-weight: bold; border-bottom: 1px solid #999;">Photon → Event</th>
+                        <th colspan="2" style="padding: 8px; border: 1px solid #ddd; text-align: center; font-weight: bold; border-bottom: 1px solid #999;">CoM Quality (px2ph)</th>
+                        <th colspan="2" style="padding: 8px; border: 1px solid #ddd; text-align: center; font-weight: bold; border-bottom: 1px solid #999;">CoM Quality (ph2ev)</th>
+                    </tr>
+                    <!-- Second level headers (specific metrics) -->
+                    <tr style="background-color: white; border-bottom: 2px solid #444;">
+                        <th style="padding: 6px; border: 1px solid #ddd; text-align: center; font-weight: bold; font-size: 0.9em;">Pixels</th>
+                        <th style="padding: 6px; border: 1px solid #ddd; text-align: center; font-weight: bold; font-size: 0.9em;">Pix %</th>
+                        <th style="padding: 6px; border: 1px solid #ddd; text-align: center; font-weight: bold; font-size: 0.9em;">Photons</th>
+                        <th style="padding: 6px; border: 1px solid #ddd; text-align: center; font-weight: bold; font-size: 0.9em;">Phot %</th>
+                        <th style="padding: 6px; border: 1px solid #ddd; text-align: center; font-weight: bold; font-size: 0.9em;">Photons</th>
+                        <th style="padding: 6px; border: 1px solid #ddd; text-align: center; font-weight: bold; font-size: 0.9em;">Phot %</th>
+                        <th style="padding: 6px; border: 1px solid #ddd; text-align: center; font-weight: bold; font-size: 0.9em;">Events</th>
+                        <th style="padding: 6px; border: 1px solid #ddd; text-align: center; font-weight: bold; font-size: 0.9em;">Evt %</th>
+                        <th style="padding: 6px; border: 1px solid #ddd; text-align: center; font-weight: bold; font-size: 0.9em;">Exact %</th>
+                        <th style="padding: 6px; border: 1px solid #ddd; text-align: center; font-weight: bold; font-size: 0.9em;">Good %</th>
+                        <th style="padding: 6px; border: 1px solid #ddd; text-align: center; font-weight: bold; font-size: 0.9em;">Exact %</th>
+                        <th style="padding: 6px; border: 1px solid #ddd; text-align: center; font-weight: bold; font-size: 0.9em;">Good %</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -1307,14 +1322,47 @@ class Analyse:
                         <td style="padding: 8px; border: 1px solid #ddd;"><strong>{row['Group']}</strong>{comp_badge}</td>
             """
 
-            # Add metric cells with color coding
-            for key in ['pix_match', 'phot_match', 'evt_match', 'com_exact_px2ph', 'com_good_px2ph', 'com_exact_ph2ev', 'com_good_ph2ev']:
+            # Pixel → Photon: Pixels count, Pix %, Photons count, Phot %
+            for key in ['pix_count', 'pix_pct', 'phot_px2ph_count', 'phot_px2ph_pct']:
+                if key in row:
+                    if '_pct' in key:
+                        value = row[key]
+                        bg_color = get_color(value)
+                        html += f'<td style="padding: 6px; border: 1px solid #ddd; text-align: center; background-color: {bg_color}; font-size: 0.9em;">{value:.1f}%</td>'
+                    else:
+                        html += f'<td style="padding: 6px; border: 1px solid #ddd; text-align: center; font-size: 0.9em;">{row[key]}</td>'
+                else:
+                    html += '<td style="padding: 6px; border: 1px solid #ddd; text-align: center; font-size: 0.9em;">—</td>'
+
+            # Photon → Event: Photons count, Phot %, Events count, Evt %
+            for key in ['phot_ph2ev_count', 'phot_ph2ev_pct', 'evt_count', 'evt_pct']:
+                if key in row:
+                    if '_pct' in key:
+                        value = row[key]
+                        bg_color = get_color(value)
+                        html += f'<td style="padding: 6px; border: 1px solid #ddd; text-align: center; background-color: {bg_color}; font-size: 0.9em;">{value:.1f}%</td>'
+                    else:
+                        html += f'<td style="padding: 6px; border: 1px solid #ddd; text-align: center; font-size: 0.9em;">{row[key]}</td>'
+                else:
+                    html += '<td style="padding: 6px; border: 1px solid #ddd; text-align: center; font-size: 0.9em;">—</td>'
+
+            # CoM Quality px2ph: Exact %, Good %
+            for key in ['com_exact_px2ph', 'com_good_px2ph']:
                 if key in row:
                     value = row[key]
                     bg_color = get_color(value)
-                    html += f'<td style="padding: 8px; border: 1px solid #ddd; text-align: center; background-color: {bg_color};">{value:.1f}%</td>'
+                    html += f'<td style="padding: 6px; border: 1px solid #ddd; text-align: center; background-color: {bg_color}; font-size: 0.9em;">{value:.1f}%</td>'
                 else:
-                    html += '<td style="padding: 8px; border: 1px solid #ddd; text-align: center;">—</td>'
+                    html += '<td style="padding: 6px; border: 1px solid #ddd; text-align: center; font-size: 0.9em;">—</td>'
+
+            # CoM Quality ph2ev: Exact %, Good %
+            for key in ['com_exact_ph2ev', 'com_good_ph2ev']:
+                if key in row:
+                    value = row[key]
+                    bg_color = get_color(value)
+                    html += f'<td style="padding: 6px; border: 1px solid #ddd; text-align: center; background-color: {bg_color}; font-size: 0.9em;">{value:.1f}%</td>'
+                else:
+                    html += '<td style="padding: 6px; border: 1px solid #ddd; text-align: center; font-size: 0.9em;">—</td>'
 
             html += """
                     </tr>
