@@ -1172,14 +1172,170 @@ class Analyse:
         # Auto-save results
         if len(self.associated_df) > 0:
             try:
-                output_path = self.save_associations(verbosity=verbosity)
+                output_path = self.save_associated_data(verbosity=verbosity)
                 if verbosity >= 1:
                     print(f"💾 Auto-saved results to: {output_path}")
             except Exception as e:
-                if verbosity >= 1:
+                if verbosity >= 2:
                     print(f"⚠️  Warning: Could not auto-save results: {e}")
 
         return self.associated_df
+
+    def get_association_stats(self):
+        """
+        Get association statistics as a dictionary.
+
+        Returns:
+            dict: Association statistics including match rates and quality metrics.
+        """
+        if self.is_groupby and self.groupby_results:
+            # Return stats for all groups
+            all_stats = {}
+            for group_name, group_df in self.groupby_results.items():
+                all_stats[group_name] = self._compute_stats_for_df(group_df)
+            return all_stats
+        elif self.associated_df is not None and len(self.associated_df) > 0:
+            # Return stats for single dataframe
+            return self._compute_stats_for_df(self.associated_df)
+        else:
+            return {}
+
+    def _compute_stats_for_df(self, df):
+        """Compute statistics for a single dataframe."""
+        stats = {}
+
+        # Pixel-photon stats
+        if 'assoc_photon_id' in df.columns:
+            total_pixels = len(df)
+            matched_pixels = df['assoc_photon_id'].notna().sum()
+            stats['pixels_total'] = total_pixels
+            stats['pixels_matched'] = matched_pixels
+            stats['pixel_photon_rate'] = matched_pixels / total_pixels if total_pixels > 0 else 0
+
+        # Photon-event stats
+        if 'assoc_event_id' in df.columns:
+            matched_to_events = df['assoc_event_id'].notna().sum()
+            stats['photons_to_events'] = matched_to_events
+            stats['photon_event_rate'] = matched_to_events / len(df) if len(df) > 0 else 0
+        elif 'assoc_cluster_id' in df.columns:
+            matched_to_events = df['assoc_cluster_id'].notna().sum()
+            stats['photons_to_events'] = matched_to_events
+            stats['photon_event_rate'] = matched_to_events / len(df) if len(df) > 0 else 0
+
+        return stats
+
+    def _repr_html_(self):
+        """
+        Generate HTML representation for Jupyter notebooks.
+
+        Returns:
+            str: HTML string with association statistics.
+        """
+        if self.is_groupby and self.groupby_results:
+            return self._repr_html_groupby()
+        elif self.associated_df is not None and len(self.associated_df) > 0:
+            return self._repr_html_single()
+        else:
+            return "<p><em>No association data available. Run associate() first.</em></p>"
+
+    def _repr_html_single(self):
+        """Generate HTML for single folder results."""
+        stats = self._compute_stats_for_df(self.associated_df)
+
+        html = """
+        <div style="font-family: Arial, sans-serif; border: 2px solid #4CAF50; border-radius: 8px; padding: 15px; margin: 10px 0; background-color: #f9f9f9;">
+            <h3 style="margin-top: 0; color: #4CAF50;">✅ Association Results</h3>
+            <table style="width: 100%; border-collapse: collapse;">
+        """
+
+        if 'pixels_total' in stats:
+            pix_rate = stats['pixel_photon_rate'] * 100
+            color = '#4CAF50' if pix_rate > 70 else '#FF9800' if pix_rate > 50 else '#F44336'
+            html += f"""
+                <tr style="border-bottom: 1px solid #ddd;">
+                    <td style="padding: 8px;"><strong>Pixel → Photon:</strong></td>
+                    <td style="padding: 8px;">{stats['pixels_matched']:,} / {stats['pixels_total']:,}</td>
+                    <td style="padding: 8px; text-align: right;">
+                        <span style="background-color: {color}; color: white; padding: 4px 8px; border-radius: 4px; font-weight: bold;">
+                            {pix_rate:.1f}%
+                        </span>
+                    </td>
+                </tr>
+            """
+
+        if 'photons_to_events' in stats:
+            phot_rate = stats['photon_event_rate'] * 100
+            color = '#4CAF50' if phot_rate > 70 else '#FF9800' if phot_rate > 50 else '#F44336'
+            html += f"""
+                <tr style="border-bottom: 1px solid #ddd;">
+                    <td style="padding: 8px;"><strong>Photon → Event:</strong></td>
+                    <td style="padding: 8px;">{stats['photons_to_events']:,} / {len(self.associated_df):,}</td>
+                    <td style="padding: 8px; text-align: right;">
+                        <span style="background-color: {color}; color: white; padding: 4px 8px; border-radius: 4px; font-weight: bold;">
+                            {phot_rate:.1f}%
+                        </span>
+                    </td>
+                </tr>
+            """
+
+        html += """
+            </table>
+        </div>
+        """
+        return html
+
+    def _repr_html_groupby(self):
+        """Generate HTML for grouped results."""
+        html = """
+        <div style="font-family: Arial, sans-serif; border: 2px solid #2196F3; border-radius: 8px; padding: 15px; margin: 10px 0; background-color: #f9f9f9;">
+            <h3 style="margin-top: 0; color: #2196F3;">📊 Groupby Association Results</h3>
+            <table style="width: 100%; border-collapse: collapse; background-color: white;">
+                <thead>
+                    <tr style="background-color: #2196F3; color: white;">
+                        <th style="padding: 10px; text-align: left;">Group</th>
+                        <th style="padding: 10px; text-align: right;">Pixels</th>
+                        <th style="padding: 10px; text-align: right;">Pix→Phot</th>
+                        <th style="padding: 10px; text-align: right;">Phot→Evt</th>
+                    </tr>
+                </thead>
+                <tbody>
+        """
+
+        for group_name, group_df in self.groupby_results.items():
+            stats = self._compute_stats_for_df(group_df)
+
+            pix_rate = stats.get('pixel_photon_rate', 0) * 100
+            pix_color = '#4CAF50' if pix_rate > 70 else '#FF9800' if pix_rate > 50 else '#F44336'
+
+            phot_rate = stats.get('photon_event_rate', 0) * 100
+            phot_color = '#4CAF50' if phot_rate > 70 else '#FF9800' if phot_rate > 50 else '#F44336'
+
+            html += f"""
+                <tr style="border-bottom: 1px solid #ddd;">
+                    <td style="padding: 8px;"><strong>{group_name}</strong></td>
+                    <td style="padding: 8px; text-align: right;">{len(group_df):,}</td>
+                    <td style="padding: 8px; text-align: right;">
+                        <span style="background-color: {pix_color}; color: white; padding: 3px 6px; border-radius: 3px; font-size: 0.9em;">
+                            {pix_rate:.1f}%
+                        </span>
+                    </td>
+                    <td style="padding: 8px; text-align: right;">
+                        <span style="background-color: {phot_color}; color: white; padding: 3px 6px; border-radius: 3px; font-size: 0.9em;">
+                            {phot_rate:.1f}%
+                        </span>
+                    </td>
+                </tr>
+            """
+
+        html += """
+                </tbody>
+            </table>
+            <p style="margin: 10px 0 0 0; font-size: 0.9em; color: #666;">
+                💡 <strong>Tip:</strong> Use <code>.plot_stats()</code> to visualize, <code>.plot_stats(group='name')</code> for specific group
+            </p>
+        </div>
+        """
+        return html
 
     def associate_groupby(self, **kwargs):
         """
