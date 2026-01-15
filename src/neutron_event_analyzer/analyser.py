@@ -1179,7 +1179,9 @@ class Analyse:
                 if verbosity >= 2:
                     print(f"⚠️  Warning: Could not auto-save results: {e}")
 
-        return self.associated_df
+        # Return HTML stats table for display
+        from IPython.display import HTML
+        return HTML(self._create_stats_html_table())
 
     def get_association_stats(self):
         """
@@ -1188,15 +1190,17 @@ class Analyse:
         Returns:
             dict: Association statistics including match rates and quality metrics.
         """
-        if self.is_groupby and self.groupby_results:
-            # Return stats for all groups
-            all_stats = {}
-            for group_name, group_df in self.groupby_results.items():
-                all_stats[group_name] = self._compute_stats_for_df(group_df)
-            return all_stats
-        elif self.associated_df is not None and len(self.associated_df) > 0:
-            # Return stats for single dataframe
-            return self._compute_stats_for_df(self.associated_df)
+        if self.is_groupby and hasattr(self, 'groupby_stats') and self.groupby_stats:
+            # Return stats for all groups (stored during association)
+            return self.groupby_stats
+        elif self.last_assoc_stats or self.last_photon_event_stats:
+            # Return stats from last association
+            stats = {}
+            if self.last_assoc_stats:
+                stats.update(self.last_assoc_stats)
+            if self.last_photon_event_stats:
+                stats['photon_event'] = self.last_photon_event_stats
+            return stats
         else:
             return {}
 
@@ -1226,63 +1230,329 @@ class Analyse:
 
     def _repr_html_(self):
         """
-        Generate HTML representation for Jupyter notebooks.
+        Generate HTML representation for Jupyter notebooks as a metrics table.
+        Metrics are columns, groups/datasets are rows.
 
         Returns:
-            str: HTML string with association statistics.
+            str: HTML string with association statistics table.
         """
+        return self._create_stats_html_table()
+
+    def _create_stats_html_table(self):
+        """Create HTML table with metrics as columns and groups as rows."""
+
+        def get_color(value):
+            """Color code percentages: red for low, green for good."""
+            if value < 50:
+                return 'indianred'
+            elif value < 70:
+                return '#FFA500'  # orange
+            else:
+                return '#90EE90'  # light green
+
+        # Collect data for table rows
+        rows_data = []
+
         if self.is_groupby and self.groupby_results:
-            return self._repr_html_groupby()
-        elif self.associated_df is not None and len(self.associated_df) > 0:
-            return self._repr_html_single()
+            # Multiple rows for grouped data
+            for group_name in self.groupby_results.keys():
+                row = {'Group': group_name}
+
+                # Get stored stats for this group (if available)
+                if hasattr(self, 'groupby_stats') and group_name in self.groupby_stats:
+                    stats = self.groupby_stats[group_name]
+                    row.update(self._extract_row_metrics(stats))
+
+                rows_data.append(row)
         else:
+            # Single row for single dataset
+            row = {'Group': 'Dataset'}
+            if self.last_assoc_stats or self.last_photon_event_stats:
+                combined_stats = {
+                    'pixel_photon': self.last_assoc_stats,
+                    'photon_event': self.last_photon_event_stats
+                }
+                row.update(self._extract_row_metrics(combined_stats))
+            rows_data.append(row)
+
+        if not rows_data or all(len(row) == 1 for row in rows_data):
             return "<p><em>No association data available. Run associate() first.</em></p>"
 
-    def _repr_html_single(self):
-        """Generate HTML for single folder results."""
-        stats = self._compute_stats_for_df(self.associated_df)
-
+        # Build HTML table
         html = """
-        <div style="font-family: Arial, sans-serif; border: 2px solid #4CAF50; border-radius: 8px; padding: 15px; margin: 10px 0; background-color: #f9f9f9;">
-            <h3 style="margin-top: 0; color: #4CAF50;">✅ Association Results</h3>
-            <table style="width: 100%; border-collapse: collapse;">
+        <div style="font-family: Arial, sans-serif; font-size: 0.85em;">
+            <table style="border-collapse: collapse; width: 100%; border: 1px solid #ddd;">
+                <thead>
+                    <tr style="background-color: #4CAF50; color: white;">
+                        <th style="padding: 8px; border: 1px solid #ddd; text-align: left;">Group</th>
+                        <th style="padding: 8px; border: 1px solid #ddd; text-align: center;">Pix Match</th>
+                        <th style="padding: 8px; border: 1px solid #ddd; text-align: center;">Phot Match</th>
+                        <th style="padding: 8px; border: 1px solid #ddd; text-align: center;">Evt Match</th>
+                        <th style="padding: 8px; border: 1px solid #ddd; text-align: center;">CoM Exact (px2ph)</th>
+                        <th style="padding: 8px; border: 1px solid #ddd; text-align: center;">CoM Good (px2ph)</th>
+                        <th style="padding: 8px; border: 1px solid #ddd; text-align: center;">CoM Exact (ph2ev)</th>
+                        <th style="padding: 8px; border: 1px solid #ddd; text-align: center;">CoM Good (ph2ev)</th>
+                    </tr>
+                </thead>
+                <tbody>
         """
 
-        if 'pixels_total' in stats:
-            pix_rate = stats['pixel_photon_rate'] * 100
-            color = '#4CAF50' if pix_rate > 70 else '#FF9800' if pix_rate > 50 else '#F44336'
+        for row in rows_data:
+            is_comparison = row['Group'] in getattr(self, 'comparison_groups', [])
+            row_bg = '#FFF3E0' if is_comparison else 'white'
+            comp_badge = ' <span style="background-color: #FF9800; color: white; padding: 2px 4px; border-radius: 2px; font-size: 0.75em;">cmp</span>' if is_comparison else ''
+
             html += f"""
-                <tr style="border-bottom: 1px solid #ddd;">
-                    <td style="padding: 8px;"><strong>Pixel → Photon:</strong></td>
-                    <td style="padding: 8px;">{stats['pixels_matched']:,} / {stats['pixels_total']:,}</td>
-                    <td style="padding: 8px; text-align: right;">
-                        <span style="background-color: {color}; color: white; padding: 4px 8px; border-radius: 4px; font-weight: bold;">
-                            {pix_rate:.1f}%
-                        </span>
-                    </td>
-                </tr>
+                    <tr style="background-color: {row_bg};">
+                        <td style="padding: 8px; border: 1px solid #ddd;"><strong>{row['Group']}</strong>{comp_badge}</td>
             """
 
-        if 'photons_to_events' in stats:
-            phot_rate = stats['photon_event_rate'] * 100
-            color = '#4CAF50' if phot_rate > 70 else '#FF9800' if phot_rate > 50 else '#F44336'
-            html += f"""
-                <tr style="border-bottom: 1px solid #ddd;">
-                    <td style="padding: 8px;"><strong>Photon → Event:</strong></td>
-                    <td style="padding: 8px;">{stats['photons_to_events']:,} / {len(self.associated_df):,}</td>
-                    <td style="padding: 8px; text-align: right;">
-                        <span style="background-color: {color}; color: white; padding: 4px 8px; border-radius: 4px; font-weight: bold;">
-                            {phot_rate:.1f}%
-                        </span>
-                    </td>
-                </tr>
+            # Add metric cells with color coding
+            for key in ['pix_match', 'phot_match', 'evt_match', 'com_exact_px2ph', 'com_good_px2ph', 'com_exact_ph2ev', 'com_good_ph2ev']:
+                if key in row:
+                    value = row[key]
+                    bg_color = get_color(value)
+                    html += f'<td style="padding: 8px; border: 1px solid #ddd; text-align: center; background-color: {bg_color};">{value:.1f}%</td>'
+                else:
+                    html += '<td style="padding: 8px; border: 1px solid #ddd; text-align: center;">—</td>'
+
+            html += """
+                    </tr>
             """
 
         html += """
+                </tbody>
             </table>
         </div>
         """
         return html
+
+    def _extract_row_metrics(self, stats):
+        """Extract metrics from stats dict for a table row."""
+        metrics = {}
+
+        if isinstance(stats, dict):
+            # Handle combined stats (single dataset)
+            if 'pixel_photon' in stats and stats['pixel_photon']:
+                pxph = stats['pixel_photon']
+                if 'matched_pixels' in pxph and 'total_pixels' in pxph:
+                    metrics['pix_match'] = 100 * pxph['matched_pixels'] / pxph['total_pixels']
+                if 'matched_photons' in pxph and 'total_photons' in pxph:
+                    metrics['phot_match'] = 100 * pxph['matched_photons'] / pxph['total_photons']
+                if 'com_quality' in pxph:
+                    total_com = sum(pxph['com_quality'].values())
+                    if total_com > 0:
+                        metrics['com_exact_px2ph'] = 100 * pxph['com_quality'].get('exact', 0) / total_com
+                        metrics['com_good_px2ph'] = 100 * pxph['com_quality'].get('good', 0) / total_com
+
+            if 'photon_event' in stats and stats['photon_event']:
+                phev = stats['photon_event']
+                if 'matched_events' in phev and 'total_events' in phev:
+                    metrics['evt_match'] = 100 * phev['matched_events'] / phev['total_events']
+                if 'quality' in phev:
+                    qual = phev['quality']
+                    total_qual = qual.get('exact_n', 0) + qual.get('n_mismatch', 0)
+                    if total_qual > 0:
+                        metrics['com_exact_ph2ev'] = 100 * qual.get('exact_com', 0) / total_qual
+                        metrics['com_good_ph2ev'] = 100 * qual.get('good_com', 0) / total_qual
+
+            # Handle direct stats (from groupby)
+            if 'matched_pixels' in stats:
+                metrics['pix_match'] = 100 * stats['matched_pixels'] / stats['total_pixels']
+            if 'matched_photons' in stats:
+                metrics['phot_match'] = 100 * stats['matched_photons'] / stats['total_photons']
+            if 'matched_events' in stats:
+                metrics['evt_match'] = 100 * stats['matched_events'] / stats['total_events']
+            if 'com_quality' in stats:
+                total_com = sum(stats['com_quality'].values())
+                if total_com > 0:
+                    metrics['com_exact_px2ph'] = 100 * stats['com_quality'].get('exact', 0) / total_com
+                    metrics['com_good_px2ph'] = 100 * stats['com_quality'].get('good', 0) / total_com
+            if 'quality' in stats:
+                qual = stats['quality']
+                total_qual = qual.get('exact_n', 0) + qual.get('n_mismatch', 0)
+                if total_qual > 0:
+                    metrics['com_exact_ph2ev'] = 100 * qual.get('exact_com', 0) / total_qual
+                    metrics['com_good_ph2ev'] = 100 * qual.get('good_com', 0) / total_qual
+
+        return metrics
+
+    def _repr_html_single(self):
+        """Generate HTML for single folder results with comprehensive statistics."""
+        html = """
+        <div style="font-family: Arial, sans-serif; font-size: 0.9em; border: 2px solid #4CAF50; border-radius: 8px; padding: 12px; margin: 10px 0; background-color: #f9f9f9;">
+            <h3 style="margin-top: 0; margin-bottom: 10px; color: #4CAF50; font-size: 1.1em;">✅ Association Results</h3>
+        """
+
+        # Pixel-Photon Association Stats
+        if self.last_assoc_stats:
+            stats = self.last_assoc_stats
+            html += """
+            <table style="width: 100%; border-collapse: collapse; background-color: white; margin-bottom: 10px; font-size: 0.85em;">
+                <thead>
+                    <tr style="background-color: #4CAF50; color: white;">
+                        <th colspan="3" style="padding: 6px; text-align: left; font-size: 0.95em;">Pixel → Photon Association</th>
+                    </tr>
+                </thead>
+                <tbody>
+            """
+
+            # Pixel and photon matching rates
+            pix_rate = 100 * stats['matched_pixels'] / stats['total_pixels']
+            phot_rate = 100 * stats['matched_photons'] / stats['total_photons']
+            pix_color = '#4CAF50' if pix_rate > 70 else '#FF9800' if pix_rate > 50 else '#F44336'
+            phot_color = '#4CAF50' if phot_rate > 70 else '#FF9800' if phot_rate > 50 else '#F44336'
+
+            html += f"""
+                    <tr style="border-bottom: 1px solid #ddd;">
+                        <td style="padding: 5px; width: 40%;">Pixels Matched</td>
+                        <td style="padding: 5px; width: 35%;">{stats['matched_pixels']:,} / {stats['total_pixels']:,}</td>
+                        <td style="padding: 5px; text-align: right; width: 25%;">
+                            <span style="background-color: {pix_color}; color: white; padding: 2px 6px; border-radius: 3px; font-size: 0.9em;">
+                                {pix_rate:.1f}%
+                            </span>
+                        </td>
+                    </tr>
+                    <tr style="border-bottom: 1px solid #ddd;">
+                        <td style="padding: 5px;">Photons Matched</td>
+                        <td style="padding: 5px;">{stats['matched_photons']:,} / {stats['total_photons']:,}</td>
+                        <td style="padding: 5px; text-align: right;">
+                            <span style="background-color: {phot_color}; color: white; padding: 2px 6px; border-radius: 3px; font-size: 0.9em;">
+                                {phot_rate:.1f}%
+                            </span>
+                        </td>
+                    </tr>
+            """
+
+            # CoM Quality
+            if 'com_quality' in stats:
+                com = stats['com_quality']
+                total = sum(com.values())
+                if total > 0:
+                    html += """
+                    <tr style="background-color: #f0f0f0;">
+                        <td colspan="3" style="padding: 5px; font-weight: bold; font-size: 0.9em;">Center-of-Mass Match Quality</td>
+                    </tr>
+                    """
+                    for quality, label in [('exact', 'Exact (≤0.1px)'), ('good', 'Good (≤30% radius)'),
+                                          ('acceptable', 'Acceptable (≤50%)'), ('poor', 'Poor (≤100%)'), ('failed', 'Failed (>100%)')]:
+                        count = com.get(quality, 0)
+                        if count > 0 or quality in ['exact', 'good']:  # Always show exact and good
+                            pct = 100 * count / total
+                            html += f"""
+                    <tr style="border-bottom: 1px solid #ddd;">
+                        <td style="padding: 5px; padding-left: 15px;">{label}</td>
+                        <td style="padding: 5px;">{count:,}</td>
+                        <td style="padding: 5px; text-align: right;">{pct:.1f}%</td>
+                    </tr>
+                            """
+
+            html += """
+                </tbody>
+            </table>
+            """
+
+        # Photon-Event Association Stats
+        if self.last_photon_event_stats:
+            stats = self.last_photon_event_stats
+            html += """
+            <table style="width: 100%; border-collapse: collapse; background-color: white; font-size: 0.85em;">
+                <thead>
+                    <tr style="background-color: #2196F3; color: white;">
+                        <th colspan="3" style="padding: 6px; text-align: left; font-size: 0.95em;">Photon → Event Association</th>
+                    </tr>
+                </thead>
+                <tbody>
+            """
+
+            # Photon and event matching rates
+            phot_rate = 100 * stats['matched_photons'] / stats['total_photons']
+            evt_rate = 100 * stats['matched_events'] / stats['total_events']
+            phot_color = '#4CAF50' if phot_rate > 70 else '#FF9800' if phot_rate > 50 else '#F44336'
+            evt_color = '#4CAF50' if evt_rate > 70 else '#FF9800' if evt_rate > 50 else '#F44336'
+
+            html += f"""
+                    <tr style="border-bottom: 1px solid #ddd;">
+                        <td style="padding: 5px; width: 40%;">Photons Matched</td>
+                        <td style="padding: 5px; width: 35%;">{stats['matched_photons']:,} / {stats['total_photons']:,}</td>
+                        <td style="padding: 5px; text-align: right; width: 25%;">
+                            <span style="background-color: {phot_color}; color: white; padding: 2px 6px; border-radius: 3px; font-size: 0.9em;">
+                                {phot_rate:.1f}%
+                            </span>
+                        </td>
+                    </tr>
+                    <tr style="border-bottom: 1px solid #ddd;">
+                        <td style="padding: 5px;">Events Matched</td>
+                        <td style="padding: 5px;">{stats['matched_events']:,} / {stats['total_events']:,}</td>
+                        <td style="padding: 5px; text-align: right;">
+                            <span style="background-color: {evt_color}; color: white; padding: 2px 6px; border-radius: 3px; font-size: 0.9em;">
+                                {evt_rate:.1f}%
+                            </span>
+                        </td>
+                    </tr>
+            """
+
+            # Association Quality
+            if 'quality' in stats:
+                qual = stats['quality']
+                matched_total = qual.get('exact_n', 0) + qual.get('n_mismatch', 0)
+                if matched_total > 0:
+                    html += """
+                    <tr style="background-color: #f0f0f0;">
+                        <td colspan="3" style="padding: 5px; font-weight: bold; font-size: 0.9em;">Association Quality</td>
+                    </tr>
+                    """
+
+                    # Photon count match
+                    exact_n = qual.get('exact_n', 0)
+                    n_mismatch = qual.get('n_mismatch', 0)
+                    exact_n_pct = 100 * exact_n / matched_total
+                    html += f"""
+                    <tr style="border-bottom: 1px solid #ddd;">
+                        <td style="padding: 5px; padding-left: 15px;">Photon count matches ev/n</td>
+                        <td style="padding: 5px;">{exact_n:,}</td>
+                        <td style="padding: 5px; text-align: right;">{exact_n_pct:.1f}%</td>
+                    </tr>
+                    """
+                    if n_mismatch > 0:
+                        n_mismatch_pct = 100 * n_mismatch / matched_total
+                        html += f"""
+                    <tr style="border-bottom: 1px solid #ddd;">
+                        <td style="padding: 5px; padding-left: 15px;">Photon count mismatch</td>
+                        <td style="padding: 5px;">{n_mismatch:,}</td>
+                        <td style="padding: 5px; text-align: right;">{n_mismatch_pct:.1f}%</td>
+                    </tr>
+                        """
+
+                    # CoM Quality
+                    html += """
+                    <tr style="background-color: #f0f0f0;">
+                        <td colspan="3" style="padding: 5px; font-weight: bold; font-size: 0.9em;">Center-of-Mass Match Quality</td>
+                    </tr>
+                    """
+                    for quality, label in [('exact_com', 'Exact (≤0.1px)'), ('good_com', 'Good (≤30% radius)'),
+                                          ('acceptable_com', 'Acceptable (≤50%)'), ('poor_com', 'Poor (>50%)')]:
+                        count = qual.get(quality, 0)
+                        if count > 0 or quality in ['exact_com', 'good_com']:
+                            pct = 100 * count / matched_total
+                            html += f"""
+                    <tr style="border-bottom: 1px solid #ddd;">
+                        <td style="padding: 5px; padding-left: 15px;">{label.split('(')[1].split(')')[0]}</td>
+                        <td style="padding: 5px;">{count:,}</td>
+                        <td style="padding: 5px; text-align: right;">{pct:.1f}%</td>
+                    </tr>
+                            """
+
+            html += """
+                </tbody>
+            </table>
+            """
+
+        html += """
+        </div>
+        """
+        return html
+
 
     def _repr_html_groupby(self):
         """Generate HTML for grouped results."""
@@ -1376,6 +1646,7 @@ class Analyse:
         results = {}
         group_stats = []  # Collect pixel-photon statistics from each group
         group_pe_stats = []  # Collect photon-event statistics from each group
+        self.groupby_stats = {}  # Store stats per group for HTML display
 
         for group_name in tqdm(self.groupby_subdirs, desc="Processing groups", disable=(verbosity == 0)):
             group_path = os.path.join(self.data_folder, group_name)
@@ -1399,13 +1670,20 @@ class Analyse:
 
                 results[group_name] = group_assoc.associated_df
 
-                # Collect pixel-photon statistics if available
+                # Collect and store statistics for this group
+                group_combined_stats = {}
                 if hasattr(group_assoc, 'last_assoc_stats') and group_assoc.last_assoc_stats:
                     group_stats.append(group_assoc.last_assoc_stats)
+                    group_combined_stats.update(group_assoc.last_assoc_stats)
 
-                # Collect photon-event statistics if available
                 if hasattr(group_assoc, 'last_photon_event_stats') and group_assoc.last_photon_event_stats:
                     group_pe_stats.append(group_assoc.last_photon_event_stats)
+                    group_combined_stats['quality'] = group_assoc.last_photon_event_stats.get('quality', {})
+                    if 'matched_events' in group_assoc.last_photon_event_stats:
+                        group_combined_stats['matched_events'] = group_assoc.last_photon_event_stats['matched_events']
+                        group_combined_stats['total_events'] = group_assoc.last_photon_event_stats['total_events']
+
+                self.groupby_stats[group_name] = group_combined_stats
 
                 if verbosity >= 2:
                     print(f"✅ {group_name}: {len(group_assoc.associated_df)} rows")
@@ -1520,7 +1798,9 @@ class Analyse:
             if verbosity >= 1:
                 print(f"💾 Saved results for {saved_count}/{len(results)} groups")
 
-        return results
+        # Return HTML stats table for display
+        from IPython.display import HTML
+        return HTML(self._create_stats_html_table())
 
     def _associate_photons_to_events(self, photons_df, events_df, weight_px_in_s, max_time_s, verbosity):
         """
@@ -1755,7 +2035,7 @@ class Analyse:
         }
 
         # Print statistics if requested
-        if verbosity >= 1:
+        if verbosity >= 2:  # Only print detailed stats at verbosity 2
             print(f"✅ Photon-Event Association Results:")
             print(f"   Photons: {matched_photons:,} / {total_photons:,} matched ({100 * matched_photons / total_photons:.1f}%)")
             print(f"   Events:  {matched_events:,} / {total_events:,} matched ({100 * matched_events / total_events:.1f}%)")
@@ -1960,7 +2240,7 @@ class Analyse:
         }
 
         # Print statistics if requested
-        if verbosity >= 1:
+        if verbosity >= 2:  # Only print detailed stats at verbosity 2
             print(f"✅ Photon-Event Association Results:")
             print(f"   Photons: {matched_photons:,} / {total_photons:,} matched ({100 * matched_photons / total_photons:.1f}%)")
             print(f"   Events:  {matched_events:,} / {total_events:,} matched ({100 * matched_events / total_events:.1f}%)")
@@ -2138,7 +2418,7 @@ class Analyse:
         }
 
         # Print statistics if requested
-        if verbosity >= 1:
+        if verbosity >= 2:  # Only print detailed stats at verbosity 2
             print(f"✅ Photon-Event Association Results:")
             print(f"   Photons: {matched_photons:,} / {total_photons:,} matched ({100 * matched_photons / total_photons:.1f}%)")
             print(f"   Events:  {matched_events:,} / {total_events:,} matched ({100 * matched_events / total_events:.1f}%)")
@@ -2341,7 +2621,7 @@ class Analyse:
         }
 
         # Print statistics if requested
-        if verbosity >= 1:
+        if verbosity >= 2:  # Only print detailed stats at verbosity 2
             print(f"✅ Pixel-Photon Association Results:")
             print(f"   Pixels:  {matched_pixels:,} / {total_pixels:,} matched ({100 * matched_pixels / total_pixels:.1f}%)")
             print(f"   Photons: {matched_photons:,} / {total_photons:,} matched ({100 * matched_photons / total_photons:.1f}%)")
@@ -2538,7 +2818,7 @@ class Analyse:
         }
 
         # Print statistics if requested
-        if verbosity >= 1:
+        if verbosity >= 2:  # Only print detailed stats at verbosity 2
             print(f"✅ Pixel-Photon Association Results:")
             print(f"   Pixels:  {matched_pixels:,} / {total_pixels:,} matched ({100 * matched_pixels / total_pixels:.1f}%)")
             print(f"   Photons: {matched_photons:,} / {total_photons:,} matched ({100 * matched_photons / total_photons:.1f}%)")
