@@ -3220,38 +3220,171 @@ class Analyse:
             raise ValueError("Associate photons and events first.")
         return self.associated_df
 
-    def plot_event(self, event_id, x_col='x', y_col='y', title=None):
+    def plot_event(self, id_selector, id_type='ev', x_col='x', y_col='y', title=None, max_plots=20):
         """
-        Plot a specific event with its associated photons.
+        Plot events or photons with their associated data.
 
-        This is a convenience method that wraps Plotter.plot_event().
+        This method can plot either by event IDs or photon IDs, and accepts:
+        - Single integer: plots one event/photon
+        - Slice: plots a range (e.g., slice(0, 10) or 0:10)
+        - List of integers: plots specific IDs
 
         Args:
-            event_id: ID of the event to plot.
-            x_col (str): Column name for x-coordinate (default: 'x').
-            y_col (str): Column name for y-coordinate (default: 'y').
-            title (str, optional): Custom title for the plot.
+            id_selector (int, slice, or list): ID(s) to plot. Can be:
+                - int: Single ID (e.g., 1130)
+                - slice: Range of IDs (e.g., slice(0, 10) or use notation id_selector=slice(0, 10))
+                - list: Specific IDs (e.g., [1130, 1131, 1135])
+            id_type (str): Type of ID - 'ev' for event IDs or 'ph' for photon IDs (default: 'ev')
+            x_col (str): Column name for x-coordinate (default: 'x')
+            y_col (str): Column name for y-coordinate (default: 'y')
+            title (str, optional): Custom title for the plot (only used for single plots)
+            max_plots (int): Maximum number of plots to generate (default: 20)
 
         Raises:
-            ValueError: If association has not been performed.
+            ValueError: If association has not been performed or invalid parameters.
+
+        Examples:
+            # Plot single event
+            assoc.plot_event(1130)
+
+            # Plot range of events
+            assoc.plot_event(slice(1130, 1140))
+
+            # Plot specific events
+            assoc.plot_event([1130, 1135, 1140])
+
+            # Plot by photon ID
+            assoc.plot_event(100, id_type='ph')
+
+            # Plot range of photons
+            assoc.plot_event(slice(0, 10), id_type='ph')
         """
         if self.associated_df is None:
             raise ValueError("Associate photons and events first.")
 
         # Import Plotter here to avoid circular import
         from .plotter import Plotter
+        import matplotlib.pyplot as plt
 
-        # Determine event column based on association method
-        event_col = 'assoc_cluster_id' if self.assoc_method == 'lumacam' else 'assoc_event_id'
+        # Determine column names based on id_type
+        if id_type == 'ev':
+            # Use exported column names (ev\id) if available, otherwise internal names
+            if 'ev\\id' in self.associated_df.columns:
+                id_col = 'ev\\id'
+            else:
+                id_col = 'assoc_cluster_id' if self.assoc_method == 'lumacam' else 'assoc_event_id'
+        elif id_type == 'ph':
+            # Use exported column names (ph\id) if available, otherwise internal names
+            if 'ph\\id' in self.associated_df.columns:
+                id_col = 'ph\\id'
+            else:
+                id_col = 'assoc_photon_id' if 'assoc_photon_id' in self.associated_df.columns else 'id'
+        else:
+            raise ValueError(f"Invalid id_type: {id_type}. Must be 'ev' or 'ph'.")
 
-        Plotter.plot_event(
-            event_id=event_id,
-            df=self.associated_df,
-            event_col=event_col,
-            x_col=x_col,
-            y_col=y_col,
-            title=title
-        )
+        # Get unique IDs from the DataFrame
+        unique_ids = self.associated_df[id_col].dropna().unique()
+
+        # Process id_selector to get list of IDs to plot
+        if isinstance(id_selector, int):
+            # Single ID
+            ids_to_plot = [id_selector]
+        elif isinstance(id_selector, slice):
+            # Slice - apply to sorted unique IDs
+            sorted_ids = sorted(unique_ids)
+            ids_to_plot = sorted_ids[id_selector]
+        elif isinstance(id_selector, (list, tuple)):
+            # List of IDs
+            ids_to_plot = list(id_selector)
+        else:
+            raise ValueError(f"Invalid id_selector type: {type(id_selector)}. Must be int, slice, or list.")
+
+        # Limit number of plots
+        if len(ids_to_plot) > max_plots:
+            print(f"⚠️  Requested {len(ids_to_plot)} plots, but max_plots={max_plots}. Plotting first {max_plots} only.")
+            ids_to_plot = ids_to_plot[:max_plots]
+
+        # Plot each ID
+        for idx, selected_id in enumerate(ids_to_plot):
+            # Filter data for this ID
+            data = self.associated_df[self.associated_df[id_col] == selected_id]
+
+            if data.empty:
+                print(f"⚠️  No data found for {id_type}\\id = {selected_id}")
+                continue
+
+            # Create plot
+            fig, ax = plt.subplots(figsize=(8, 8))
+
+            # Determine what to plot based on id_type
+            if id_type == 'ev':
+                # Plotting by event - show associated photons
+                # Use ph\x, ph\y if available (exported format), otherwise x, y
+                if 'ph\\x' in data.columns and 'ph\\y' in data.columns:
+                    ax.scatter(data['ph\\x'], data['ph\\y'], c='blue', label='Photons', alpha=0.6, s=50)
+                else:
+                    ax.scatter(data[x_col], data[y_col], c='blue', label='Photons', alpha=0.6, s=50)
+
+                # Plot event center if available
+                if 'ev\\x' in data.columns and 'ev\\y' in data.columns:
+                    ev_x = data['ev\\x'].iloc[0]
+                    ev_y = data['ev\\y'].iloc[0]
+                    ax.scatter(ev_x, ev_y, c='red', marker='x', s=200, linewidths=3, label='Event Center')
+                elif 'assoc_x' in data.columns and 'assoc_y' in data.columns:
+                    ev_x = data['assoc_x'].iloc[0]
+                    ev_y = data['assoc_y'].iloc[0]
+                    ax.scatter(ev_x, ev_y, c='red', marker='x', s=200, linewidths=3, label='Event Center')
+
+                plot_title = title if title and len(ids_to_plot) == 1 else f'Event ID: {selected_id}'
+
+                # Add n count if available
+                if 'ev\\n' in data.columns:
+                    n_value = data['ev\\n'].iloc[0]
+                    plot_title += f' (n={int(n_value)})'
+                elif 'ph\\n' in data.columns:
+                    n_value = data['ph\\n'].iloc[0]
+                    plot_title += f' (n={int(n_value)})'
+
+            else:  # id_type == 'ph'
+                # Plotting by photon - show the photon and any associated pixels/events
+                # Plot photon position
+                if 'ph\\x' in data.columns and 'ph\\y' in data.columns:
+                    ph_x = data['ph\\x'].iloc[0]
+                    ph_y = data['ph\\y'].iloc[0]
+                    ax.scatter(ph_x, ph_y, c='green', marker='o', s=200, label='Photon Center')
+                else:
+                    ph_x = data[x_col].iloc[0]
+                    ph_y = data[y_col].iloc[0]
+                    ax.scatter(ph_x, ph_y, c='green', marker='o', s=200, label='Photon Center')
+
+                # Plot associated pixels if available
+                if 'px\\x' in data.columns and 'px\\y' in data.columns:
+                    pixel_data = data[data['px\\x'].notna()]
+                    if not pixel_data.empty:
+                        ax.scatter(pixel_data['px\\x'], pixel_data['px\\y'], c='blue', marker='s',
+                                 s=100, alpha=0.5, label='Pixels')
+
+                # Plot associated event if available
+                if 'ev\\x' in data.columns and 'ev\\y' in data.columns:
+                    ev_x = data['ev\\x'].iloc[0]
+                    ev_y = data['ev\\y'].iloc[0]
+                    if not pd.isna(ev_x):
+                        ax.scatter(ev_x, ev_y, c='red', marker='x', s=200, linewidths=3, label='Event Center')
+
+                plot_title = title if title and len(ids_to_plot) == 1 else f'Photon ID: {selected_id}'
+
+            ax.set_xlabel('X (pixels)', fontsize=12)
+            ax.set_ylabel('Y (pixels)', fontsize=12)
+            ax.legend(fontsize=10)
+            ax.set_title(plot_title, fontsize=14)
+            ax.grid(True, alpha=0.3)
+            ax.set_aspect('equal')
+
+            plt.tight_layout()
+            plt.show()
+
+        if len(ids_to_plot) > 1:
+            print(f"✅ Plotted {len(ids_to_plot)} {id_type}\\id(s)")
 
     def _rename_columns_for_export(self, df):
         """
