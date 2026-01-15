@@ -129,6 +129,7 @@ class Analyse:
         self.is_groupby = is_groupby
         self.groupby_subdirs = subdirs if is_groupby else []
         self.groupby_results = {}  # Store results from grouped analyses
+        self.limit = limit  # Store limit for passing to child groups
 
         # Auto-detect settings if not provided (do this even for groupby folders)
         if settings is None:
@@ -156,13 +157,25 @@ class Analyse:
 
             # Try to load pre-existing association results for all groups
             loaded_groups = []
+            self.groupby_stats = {}  # Initialize stats storage
             for subdir in subdirs:
                 group_path = os.path.join(data_folder, subdir)
                 assoc_file = os.path.join(group_path, "AssociatedResults", "associated_data.csv")
+                stats_file = os.path.join(group_path, "AssociatedResults", "association_stats.json")
                 if os.path.exists(assoc_file):
                     try:
                         group_df = pd.read_csv(assoc_file)
                         self.groupby_results[subdir] = group_df
+
+                        # Try to load stats from JSON file first (more accurate)
+                        if os.path.exists(stats_file):
+                            import json
+                            with open(stats_file, 'r') as f:
+                                self.groupby_stats[subdir] = json.load(f)
+                        else:
+                            # Fall back to computing stats from DataFrame (less accurate for px2ph)
+                            self.groupby_stats[subdir] = self._compute_stats_from_dataframe(group_df)
+
                         loaded_groups.append(subdir)
                     except Exception as e:
                         if verbosity >= 2:
@@ -189,11 +202,30 @@ class Analyse:
 
         # Try to load pre-existing association results
         assoc_file = os.path.join(data_folder, "AssociatedResults", "associated_data.csv")
+        stats_file = os.path.join(data_folder, "AssociatedResults", "association_stats.json")
         loaded_assoc_results = False
         if os.path.exists(assoc_file):
             try:
                 self.associated_df = pd.read_csv(assoc_file)
                 loaded_assoc_results = True
+
+                # Try to load stats from JSON file first (more accurate)
+                if os.path.exists(stats_file):
+                    import json
+                    with open(stats_file, 'r') as f:
+                        stats_dict = json.load(f)
+                        if 'pixel_photon' in stats_dict:
+                            self.last_assoc_stats = stats_dict['pixel_photon']
+                        if 'photon_event' in stats_dict:
+                            self.last_photon_event_stats = stats_dict['photon_event']
+                else:
+                    # Fall back to computing stats from DataFrame (less accurate for px2ph)
+                    computed_stats = self._compute_stats_from_dataframe(self.associated_df)
+                    if 'pixel_photon' in computed_stats:
+                        self.last_assoc_stats = computed_stats['pixel_photon']
+                    if 'photon_event' in computed_stats:
+                        self.last_photon_event_stats = computed_stats['photon_event']
+
                 if verbosity >= 1:
                     print(f"\n📂 Auto-loaded association results: {len(self.associated_df):,} rows")
             except Exception as e:
@@ -907,7 +939,7 @@ class Analyse:
                 ) for pair in self.pair_dfs
             ]
             associated_list = []
-            for future in tqdm(as_completed(futures), total=len(futures), desc="Associating pairs", disable=(verbosity == 0)):
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Associating photons to events", disable=(verbosity == 0)):
                 result = future.result()
                 if result is not None:
                     associated_list.append(result)
@@ -1238,6 +1270,83 @@ class Analyse:
         """
         return self._create_stats_html_table()
 
+    def _compute_stats_from_dataframe(self, df):
+        """Compute association statistics from an already-associated DataFrame.
+
+        This is used when loading pre-existing association results from CSV files.
+
+        Args:
+            df: Associated DataFrame with columns like 'ev\\n', 'ph\\n', etc. (backslash notation)
+
+        Returns:
+            dict: Statistics dictionary with 'pixel_photon' and 'photon_event' keys
+        """
+        stats = {}
+
+        # Check what columns are available (handle backslash notation from CSV)
+        # Pixels can be represented as individual pixel columns (px\x, px\y, etc.)
+        has_pixels = any(col.startswith('px\\') for col in df.columns)
+        has_photons = 'ph\\n' in df.columns
+        has_events = 'ev\\n' in df.columns
+
+        # Note: Pixel-photon stats cannot be accurately reconstructed from association CSV
+        # because the CSV doesn't contain info about unmatched pixels or the original pixel count.
+        # These stats should be loaded from a separate stats file or computed during association.
+
+        # Compute photon-event stats if event data is present
+        if has_photons and has_events:
+            # Count photons matched to events (rows with ev\id not null)
+            event_rows = df[df['ev\\id'].notna()]
+            matched_photons = len(event_rows)
+            total_photons = len(df)
+
+            # Count events (unique event IDs)
+            if 'ev\\id' in df.columns:
+                matched_events = int(df['ev\\id'].nunique())
+                # Total events = matched events (we don't know unmatched events from CSV)
+                total_events = matched_events
+            else:
+                matched_events = len(event_rows)
+                total_events = matched_events
+
+            # Compute quality stats if available
+            quality_stats = {'exact_n': 0, 'n_mismatch': 0, 'exact_com': 0, 'good_com': 0,
+                           'acceptable_com': 0, 'poor_com': 0}
+
+            # Check n matching (compare ev\n with ph\n)
+            if 'ev\\n' in df.columns and 'ph\\n' in df.columns:
+                event_rows_with_n = event_rows[(event_rows['ev\\n'].notna()) & (event_rows['ph\\n'].notna())]
+                if len(event_rows_with_n) > 0:
+                    quality_stats['exact_n'] = int((event_rows_with_n['ev\\n'] == event_rows_with_n['ph\\n']).sum())
+                    quality_stats['n_mismatch'] = int((event_rows_with_n['ev\\n'] != event_rows_with_n['ph\\n']).sum())
+
+            # Check CoM quality - look for CoM distance columns
+            com_col = None
+            for col in ['com_dist_ph2ev', 'ph\\com_dist', 'com_dist']:
+                if col in df.columns:
+                    com_col = col
+                    break
+
+            if com_col:
+                com_data = event_rows[com_col].dropna()
+                if len(com_data) > 0:
+                    search_radius = 50.0  # Default assumption for ph2ev
+
+                    quality_stats['exact_com'] = int((com_data <= 0.1).sum())
+                    quality_stats['good_com'] = int(((com_data > 0.1) & (com_data <= search_radius * 0.3)).sum())
+                    quality_stats['acceptable_com'] = int(((com_data > search_radius * 0.3) & (com_data <= search_radius * 0.5)).sum())
+                    quality_stats['poor_com'] = int((com_data > search_radius * 0.5).sum())
+
+            stats['photon_event'] = {
+                'matched_photons': int(matched_photons),
+                'total_photons': int(total_photons),
+                'matched_events': int(matched_events),
+                'total_events': int(total_events),
+                'quality': quality_stats
+            }
+
+        return stats
+
     def _create_stats_html_table(self):
         """Create HTML table with metrics as columns and groups as rows."""
 
@@ -1245,7 +1354,7 @@ class Analyse:
             """Color code percentages: red for low, green for good."""
             if value < 50:
                 return 'indianred'
-            elif value < 70:
+            elif value < 90:
                 return '#FFA500'  # orange
             else:
                 return '#90EE90'  # light green
@@ -1283,11 +1392,11 @@ class Analyse:
         # Build HTML table with multiindex-style headers
         html = """
         <div style="font-family: Arial, sans-serif; font-size: 0.85em;">
-            <table style="border-collapse: collapse; width: 100%; border: 1px solid #ddd;">
+            <table style="border-collapse: collapse; border: 1px solid #ddd; table-layout: auto;">
                 <thead>
                     <!-- Top level headers (category grouping) -->
                     <tr style="background-color: white; border-bottom: 2px solid #ddd;">
-                        <th rowspan="2" style="padding: 8px; border: 1px solid #ddd; text-align: left; font-weight: bold;">Group</th>
+                        <th rowspan="2" style="padding: 8px; border: 1px solid #ddd; text-align: left; font-weight: bold; white-space: nowrap;">Group</th>
                         <th colspan="4" style="padding: 8px; border: 1px solid #ddd; text-align: center; font-weight: bold; border-bottom: 1px solid #999;">Pixel → Photon</th>
                         <th colspan="4" style="padding: 8px; border: 1px solid #ddd; text-align: center; font-weight: bold; border-bottom: 1px solid #999;">Photon → Event</th>
                         <th colspan="2" style="padding: 8px; border: 1px solid #ddd; text-align: center; font-weight: bold; border-bottom: 1px solid #999;">CoM Quality (px2ph)</th>
@@ -1319,7 +1428,7 @@ class Analyse:
 
             html += f"""
                     <tr style="background-color: {row_bg};">
-                        <td style="padding: 8px; border: 1px solid #ddd;"><strong>{row['Group']}</strong>{comp_badge}</td>
+                        <td style="padding: 8px; border: 1px solid #ddd; white-space: nowrap;"><strong>{row['Group']}</strong>{comp_badge}</td>
             """
 
             # Pixel → Photon: Pixels count, Pix %, Photons count, Phot %
@@ -1774,7 +1883,8 @@ class Analyse:
                     use_lumacam=self.use_lumacam,
                     settings=None,  # Let child auto-detect its own settings first
                     parent_settings=self.settings,  # Provide parent settings as fallback
-                    verbosity=0  # Suppress individual group output
+                    verbosity=0,  # Suppress individual group output
+                    limit=self.limit  # Pass limit to child groups
                 )
 
                 # Run association with provided kwargs (but override verbosity to 0)
@@ -1784,18 +1894,20 @@ class Analyse:
 
                 results[group_name] = group_assoc.associated_df
 
+                # Save association results for this group (includes stats JSON)
+                group_assoc.save_associations(verbosity=0)
+
                 # Collect and store statistics for this group
                 group_combined_stats = {}
                 if hasattr(group_assoc, 'last_assoc_stats') and group_assoc.last_assoc_stats:
                     group_stats.append(group_assoc.last_assoc_stats)
-                    group_combined_stats.update(group_assoc.last_assoc_stats)
+                    # Store px2ph stats under 'pixel_photon' key for consistency
+                    group_combined_stats['pixel_photon'] = group_assoc.last_assoc_stats.copy()
 
                 if hasattr(group_assoc, 'last_photon_event_stats') and group_assoc.last_photon_event_stats:
                     group_pe_stats.append(group_assoc.last_photon_event_stats)
-                    group_combined_stats['quality'] = group_assoc.last_photon_event_stats.get('quality', {})
-                    if 'matched_events' in group_assoc.last_photon_event_stats:
-                        group_combined_stats['matched_events'] = group_assoc.last_photon_event_stats['matched_events']
-                        group_combined_stats['total_events'] = group_assoc.last_photon_event_stats['total_events']
+                    # Store ph2ev stats under 'photon_event' key for consistency
+                    group_combined_stats['photon_event'] = group_assoc.last_photon_event_stats.copy()
 
                 self.groupby_stats[group_name] = group_combined_stats
 
@@ -3357,6 +3469,35 @@ For more information, see: https://github.com/nuclear/neutron_event_analyzer
                 raise ImportError("Parquet format requires pyarrow or fastparquet. Install with: pip install pyarrow")
         else:
             raise ValueError(f"Unsupported format: {format}. Use 'csv' or 'parquet'.")
+
+        # Also save statistics as JSON for later retrieval
+        stats_dict = {}
+        if self.last_assoc_stats:
+            stats_dict['pixel_photon'] = self.last_assoc_stats
+        if self.last_photon_event_stats:
+            stats_dict['photon_event'] = self.last_photon_event_stats
+
+        if stats_dict:
+            import json
+            stats_path = os.path.join(output_dir, "association_stats.json")
+            # Convert numpy types to native Python types for JSON serialization
+            def convert_numpy(obj):
+                import numpy as np
+                if isinstance(obj, np.integer):
+                    return int(obj)
+                elif isinstance(obj, np.floating):
+                    return float(obj)
+                elif isinstance(obj, np.ndarray):
+                    return obj.tolist()
+                elif isinstance(obj, dict):
+                    return {key: convert_numpy(value) for key, value in obj.items()}
+                elif isinstance(obj, list):
+                    return [convert_numpy(item) for item in obj]
+                return obj
+
+            stats_dict_clean = convert_numpy(stats_dict)
+            with open(stats_path, 'w') as f:
+                json.dump(stats_dict_clean, f, indent=2)
 
         if verbosity >= 1:
             file_size = os.path.getsize(output_path) / (1024 * 1024)  # Size in MB
