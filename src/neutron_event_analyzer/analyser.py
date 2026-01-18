@@ -1574,10 +1574,19 @@ class Analyse:
             # Compute stats
             computed_stats = self._compute_stats_from_dataframe(self.associated_df)
 
+            if verbosity >= 2:
+                print(f"  Computed stats keys: {list(computed_stats.keys())}")
+                if 'photon_event' in computed_stats:
+                    print(f"  Photon-event stats: {computed_stats['photon_event']}")
+
             if 'pixel_photon' in computed_stats:
                 self.last_assoc_stats = computed_stats['pixel_photon']
             if 'photon_event' in computed_stats:
                 self.last_photon_event_stats = computed_stats['photon_event']
+
+            if verbosity >= 2:
+                print(f"  self.last_assoc_stats: {self.last_assoc_stats}")
+                print(f"  self.last_photon_event_stats: {self.last_photon_event_stats}")
 
             # Save stats as JSON
             if computed_stats:
@@ -1638,16 +1647,16 @@ class Analyse:
             import os
             folder_name = os.path.basename(self.data_folder)
             row = {'Group': folder_name}
-            if self.last_assoc_stats or self.last_photon_event_stats:
-                combined_stats = {
-                    'pixel_photon': self.last_assoc_stats,
-                    'photon_event': self.last_photon_event_stats
-                }
-                row.update(self._extract_row_metrics(combined_stats))
+            # Always try to extract metrics even if stats might be partial
+            combined_stats = {
+                'pixel_photon': self.last_assoc_stats if self.last_assoc_stats else {},
+                'photon_event': self.last_photon_event_stats if self.last_photon_event_stats else {}
+            }
+            row.update(self._extract_row_metrics(combined_stats))
             rows_data.append(row)
 
         if not rows_data or all(len(row) == 1 for row in rows_data):
-            return "<p><em>No association data available. Run associate() first.</em></p>"
+            return "<p><em>No association data available. Run associate() first, or use compute_stats_from_csv() if you have existing CSV files.</em></p>"
 
         # Build HTML table with multiindex-style headers
         html = """
