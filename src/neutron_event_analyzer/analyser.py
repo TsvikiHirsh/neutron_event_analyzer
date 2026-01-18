@@ -601,11 +601,11 @@ class Analyse:
 
         if os.path.exists(exported_csv):
             # Use already exported CSV
-            logger.info(f"Using existing CSV: {exported_csv}")
+            logger.debug(f"Using existing CSV: {exported_csv}")
             csv_file = exported_csv
         elif os.path.exists(exported_csv_with_prefix):
             # Use CSV with exported_ prefix
-            logger.info(f"Using existing CSV: {exported_csv_with_prefix}")
+            logger.debug(f"Using existing CSV: {exported_csv_with_prefix}")
             csv_file = exported_csv_with_prefix
         else:
             # Fall back to empir binary conversion
@@ -687,11 +687,11 @@ class Analyse:
 
         if os.path.exists(exported_csv):
             # Use already exported CSV
-            logger.info(f"Using existing CSV: {exported_csv}")
+            logger.debug(f"Using existing CSV: {exported_csv}")
             csv_file = exported_csv
         elif os.path.exists(exported_csv_with_prefix):
             # Use CSV with exported_ prefix
-            logger.info(f"Using existing CSV: {exported_csv_with_prefix}")
+            logger.debug(f"Using existing CSV: {exported_csv_with_prefix}")
             csv_file = exported_csv_with_prefix
         else:
             # Fall back to empir binary conversion
@@ -770,11 +770,11 @@ class Analyse:
 
         if os.path.exists(exported_csv):
             # Use already exported CSV
-            logger.info(f"Using existing CSV: {exported_csv}")
+            logger.debug(f"Using existing CSV: {exported_csv}")
             csv_file = exported_csv
         elif os.path.exists(exported_csv_with_prefix):
             # Use CSV with exported_ prefix
-            logger.info(f"Using existing CSV: {exported_csv_with_prefix}")
+            logger.debug(f"Using existing CSV: {exported_csv_with_prefix}")
             csv_file = exported_csv_with_prefix
         else:
             # Fall back to empir binary conversion
@@ -1193,9 +1193,14 @@ class Analyse:
             pixels_full['_merge_t'] = pixels_full['assoc_phot_t'].round(12)
 
             # Select only needed columns from photons to merge
-            photon_event_cols = photons_with_events[['_merge_x', '_merge_y', '_merge_t',
-                                                     event_col, 'assoc_x', 'assoc_y', 'assoc_t',
-                                                     'assoc_n', 'assoc_PSD']].copy()
+            # Include assoc_com_dist for ev/cog (photon-to-event CoG distance)
+            merge_cols = ['_merge_x', '_merge_y', '_merge_t',
+                         event_col, 'assoc_x', 'assoc_y', 'assoc_t',
+                         'assoc_n', 'assoc_PSD']
+            # Add assoc_com_dist if present
+            if 'assoc_com_dist' in photons_with_events.columns:
+                merge_cols.append('assoc_com_dist')
+            photon_event_cols = photons_with_events[merge_cols].copy()
 
             # Rename event columns to avoid conflicts
             photon_event_cols = photon_event_cols.rename(columns={event_col: 'assoc_event_id'})
@@ -2967,8 +2972,7 @@ class Analyse:
         pixels['assoc_phot_x'] = np.nan
         pixels['assoc_phot_y'] = np.nan
         pixels['assoc_phot_t'] = np.nan
-        pixels['pixel_time_diff_ns'] = np.nan
-        pixels['pixel_spatial_diff_px'] = np.nan
+        pixels['pixel_com_dist'] = np.nan  # CoM distance from pixel cluster to photon
 
         # Ensure sorted by time
         pixels = pixels.sort_values('t').reset_index(drop=True)
@@ -3098,8 +3102,7 @@ class Analyse:
                     pixels.loc[pix_idx, 'assoc_phot_x'] = phot_x
                     pixels.loc[pix_idx, 'assoc_phot_y'] = phot_y
                     pixels.loc[pix_idx, 'assoc_phot_t'] = phot_t
-                    pixels.loc[pix_idx, 'pixel_time_diff_ns'] = final_time_diffs[i]
-                    pixels.loc[pix_idx, 'pixel_spatial_diff_px'] = final_spatial_diffs[i]
+                    pixels.loc[pix_idx, 'pixel_com_dist'] = final_com_dist  # Same CoM dist for all pixels in cluster
 
         # Always compute statistics (store for later use)
         matched_pixels = pixels['assoc_photon_id'].notna().sum()
@@ -3180,8 +3183,7 @@ class Analyse:
         pixels['assoc_phot_x'] = np.nan
         pixels['assoc_phot_y'] = np.nan
         pixels['assoc_phot_t'] = np.nan
-        pixels['pixel_time_diff_ns'] = np.nan
-        pixels['pixel_spatial_diff_px'] = np.nan
+        pixels['pixel_com_dist'] = np.nan  # CoM distance from pixel cluster to photon
 
         # Sort by time
         pixels = pixels.sort_values('t').reset_index(drop=True)
@@ -3286,17 +3288,14 @@ class Analyse:
 
             # Assign the best subset to this photon
             final_idx = unassigned_idx[best_subset_mask]
-            final_spatial_diffs = unassigned_spatial_diffs[best_subset_mask]
-            final_time_diffs = unassigned_time_diffs[best_subset_mask]
 
             if len(final_idx) > 0:  # Only assign if we found at least one pixel
-                for i, pix_idx in enumerate(final_idx):
+                for pix_idx in final_idx:
                     pixels.loc[pix_idx, 'assoc_photon_id'] = phot_id
                     pixels.loc[pix_idx, 'assoc_phot_x'] = phot_x
                     pixels.loc[pix_idx, 'assoc_phot_y'] = phot_y
                     pixels.loc[pix_idx, 'assoc_phot_t'] = phot_t
-                    pixels.loc[pix_idx, 'pixel_time_diff_ns'] = final_time_diffs[i]
-                    pixels.loc[pix_idx, 'pixel_spatial_diff_px'] = final_spatial_diffs[i]
+                    pixels.loc[pix_idx, 'pixel_com_dist'] = final_com_dist  # Same CoM dist for all pixels in cluster
 
         # Always compute statistics (store for later use)
         matched_pixels = pixels['assoc_photon_id'].notna().sum()
@@ -3380,8 +3379,8 @@ class Analyse:
             rename_map['assoc_phot_t'] = 'ph/toa'
 
         # Photon CoG distance (quality of pixel-to-photon association)
-        if 'assoc_com_dist' in df.columns:
-            rename_map['assoc_com_dist'] = 'ph/cog'
+        if 'pixel_com_dist' in df.columns:
+            rename_map['pixel_com_dist'] = 'ph/cog'
 
         # Event association columns
         if 'assoc_event_id' in df.columns:
@@ -3398,8 +3397,8 @@ class Analyse:
             rename_map['assoc_PSD'] = 'ev/psd'
 
         # Event CoG distance (quality of photon-to-event association)
-        if 'com_dist_ph2ev' in df.columns:
-            rename_map['com_dist_ph2ev'] = 'ev/cog'
+        if 'assoc_com_dist' in df.columns:
+            rename_map['assoc_com_dist'] = 'ev/cog'
 
         # Apply renaming
         df = df.rename(columns=rename_map)
@@ -3696,7 +3695,7 @@ class Analyse:
             'assoc_phot_x': 'ph/x',
             'assoc_phot_y': 'ph/y',
             'assoc_phot_t': 'ph/toa',
-            'assoc_com_dist': 'ph/cog',  # Pixel-photon CoG distance
+            'pixel_com_dist': 'ph/cog',  # Pixel-photon CoG distance
 
             # Photon-event association columns
             'assoc_event_id': 'ev/id',
@@ -3706,7 +3705,7 @@ class Analyse:
             'assoc_t': 'ev/toa',
             'assoc_n': 'ev/n',
             'assoc_PSD': 'ev/psd',
-            'com_dist_ph2ev': 'ev/cog',  # Photon-event CoG distance
+            'assoc_com_dist': 'ev/cog',  # Photon-event CoG distance
         }
 
         if has_pixel_data:
