@@ -1416,6 +1416,197 @@ class Analyse:
 
         return stats
 
+    def compute_stats_from_csv(self, verbosity=1):
+        """
+        Compute association statistics from existing CSV files in AssociatedResults folders.
+
+        This is useful for archive folders that only have AssociatedResults/associated_data.csv
+        without the original data files. The method:
+        1. Loads CSV files from AssociatedResults folders
+        2. Computes statistics from the loaded data
+        3. Saves statistics as JSON files
+        4. Returns HTML table with the statistics
+
+        Works for both single folders and groupby folder structures.
+
+        Args:
+            verbosity (int): Verbosity level (0=silent, 1=info, 2=debug)
+
+        Returns:
+            IPython.display.HTML: HTML table with association statistics
+
+        Raises:
+            ValueError: If no AssociatedResults CSV files are found
+
+        Example:
+            # For single folder
+            assoc = nea.Analyse("path/to/archive_folder", events=False, photons=False, pixels=False)
+            assoc.compute_stats_from_csv()
+
+            # For groupby folder
+            assoc = nea.Analyse("path/to/archive_groupby", events=False, photons=False, pixels=False)
+            assoc.compute_stats_from_csv()
+        """
+        import json
+        from IPython.display import HTML
+
+        if self.is_groupby:
+            # Process grouped folders
+            if not self.groupby_results:
+                # Try to load CSVs if not already loaded
+                loaded_groups = []
+                self.groupby_stats = {}
+
+                for subdir in self.groupby_subdirs:
+                    group_path = os.path.join(self.data_folder, subdir)
+                    assoc_file = os.path.join(group_path, "AssociatedResults", "associated_data.csv")
+                    stats_file = os.path.join(group_path, "AssociatedResults", "association_stats.json")
+
+                    if os.path.exists(assoc_file):
+                        try:
+                            if verbosity >= 2:
+                                print(f"Loading {subdir}...")
+
+                            # Load CSV
+                            group_df = pd.read_csv(assoc_file)
+                            self.groupby_results[subdir] = group_df
+
+                            # Compute stats from CSV
+                            computed_stats = self._compute_stats_from_dataframe(group_df)
+
+                            # Save stats as JSON
+                            if computed_stats:
+                                # Convert numpy types for JSON
+                                def convert_numpy(obj):
+                                    import numpy as np
+                                    if isinstance(obj, np.integer):
+                                        return int(obj)
+                                    elif isinstance(obj, np.floating):
+                                        return float(obj)
+                                    elif isinstance(obj, np.ndarray):
+                                        return obj.tolist()
+                                    elif isinstance(obj, dict):
+                                        return {key: convert_numpy(value) for key, value in obj.items()}
+                                    elif isinstance(obj, list):
+                                        return [convert_numpy(item) for item in obj]
+                                    return obj
+
+                                stats_dict_clean = convert_numpy(computed_stats)
+
+                                # Ensure AssociatedResults directory exists
+                                os.makedirs(os.path.dirname(stats_file), exist_ok=True)
+
+                                with open(stats_file, 'w') as f:
+                                    json.dump(stats_dict_clean, f, indent=2)
+
+                                if verbosity >= 2:
+                                    print(f"  ✅ Saved stats to {stats_file}")
+
+                            self.groupby_stats[subdir] = computed_stats
+                            loaded_groups.append(subdir)
+
+                        except Exception as e:
+                            if verbosity >= 1:
+                                print(f"⚠️  Could not process {subdir}: {e}")
+
+                if not loaded_groups:
+                    raise ValueError("No AssociatedResults CSV files found in any group folders")
+
+                if verbosity >= 1:
+                    print(f"\n✅ Computed stats for {len(loaded_groups)} group(s):")
+                    for group in loaded_groups:
+                        n_rows = len(self.groupby_results[group])
+                        print(f"   - {group}: {n_rows:,} rows")
+            else:
+                # Groupby results already loaded, just compute stats
+                if verbosity >= 1:
+                    print(f"Computing stats from {len(self.groupby_results)} loaded group(s)...")
+
+                for group_name, group_df in self.groupby_results.items():
+                    computed_stats = self._compute_stats_from_dataframe(group_df)
+                    self.groupby_stats[group_name] = computed_stats
+
+                    # Save stats JSON
+                    group_path = os.path.join(self.data_folder, group_name)
+                    stats_file = os.path.join(group_path, "AssociatedResults", "association_stats.json")
+
+                    if computed_stats:
+                        def convert_numpy(obj):
+                            import numpy as np
+                            if isinstance(obj, np.integer):
+                                return int(obj)
+                            elif isinstance(obj, np.floating):
+                                return float(obj)
+                            elif isinstance(obj, np.ndarray):
+                                return obj.tolist()
+                            elif isinstance(obj, dict):
+                                return {key: convert_numpy(value) for key, value in obj.items()}
+                            elif isinstance(obj, list):
+                                return [convert_numpy(item) for item in obj]
+                            return obj
+
+                        stats_dict_clean = convert_numpy(computed_stats)
+                        os.makedirs(os.path.dirname(stats_file), exist_ok=True)
+
+                        with open(stats_file, 'w') as f:
+                            json.dump(stats_dict_clean, f, indent=2)
+
+                if verbosity >= 1:
+                    print(f"✅ Computed and saved stats for all groups")
+
+        else:
+            # Process single folder
+            assoc_file = os.path.join(self.data_folder, "AssociatedResults", "associated_data.csv")
+            stats_file = os.path.join(self.data_folder, "AssociatedResults", "association_stats.json")
+
+            if not os.path.exists(assoc_file):
+                raise ValueError(f"No AssociatedResults CSV found at {assoc_file}")
+
+            if verbosity >= 1:
+                print(f"Loading association data from CSV...")
+
+            # Load CSV if not already loaded
+            if self.associated_df is None:
+                self.associated_df = pd.read_csv(assoc_file)
+                if verbosity >= 1:
+                    print(f"  Loaded {len(self.associated_df):,} rows")
+
+            # Compute stats
+            computed_stats = self._compute_stats_from_dataframe(self.associated_df)
+
+            if 'pixel_photon' in computed_stats:
+                self.last_assoc_stats = computed_stats['pixel_photon']
+            if 'photon_event' in computed_stats:
+                self.last_photon_event_stats = computed_stats['photon_event']
+
+            # Save stats as JSON
+            if computed_stats:
+                def convert_numpy(obj):
+                    import numpy as np
+                    if isinstance(obj, np.integer):
+                        return int(obj)
+                    elif isinstance(obj, np.floating):
+                        return float(obj)
+                    elif isinstance(obj, np.ndarray):
+                        return obj.tolist()
+                    elif isinstance(obj, dict):
+                        return {key: convert_numpy(value) for key, value in obj.items()}
+                    elif isinstance(obj, list):
+                        return [convert_numpy(item) for item in obj]
+                    return obj
+
+                stats_dict_clean = convert_numpy(computed_stats)
+                os.makedirs(os.path.dirname(stats_file), exist_ok=True)
+
+                with open(stats_file, 'w') as f:
+                    json.dump(stats_dict_clean, f, indent=2)
+
+                if verbosity >= 1:
+                    print(f"✅ Computed and saved stats to {stats_file}")
+
+        # Return HTML table
+        return HTML(self._create_stats_html_table())
+
     def _create_stats_html_table(self):
         """Create HTML table with metrics as columns and groups as rows."""
 
