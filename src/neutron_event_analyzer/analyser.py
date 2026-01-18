@@ -1622,10 +1622,12 @@ class Analyse:
                 # CoM Quality ph2ev
                 if 'quality' in phev:
                     qual = phev['quality']
-                    total_qual = qual.get('exact_n', 0) + qual.get('n_mismatch', 0)
-                    if total_qual > 0:
-                        metrics['com_exact_ph2ev'] = 100 * qual.get('exact_com', 0) / total_qual
-                        metrics['com_good_ph2ev'] = 100 * qual.get('good_com', 0) / total_qual
+                    # Use total CoM quality counts as denominator
+                    total_com = (qual.get('exact_com', 0) + qual.get('good_com', 0) +
+                                qual.get('acceptable_com', 0) + qual.get('poor_com', 0))
+                    if total_com > 0:
+                        metrics['com_exact_ph2ev'] = 100 * qual.get('exact_com', 0) / total_com
+                        metrics['com_good_ph2ev'] = 100 * qual.get('good_com', 0) / total_com
 
             # Handle direct stats (from groupby) - same structure
             if 'matched_pixels' in stats and 'total_pixels' in stats:
@@ -1662,10 +1664,12 @@ class Analyse:
 
             if 'quality' in stats:
                 qual = stats['quality']
-                total_qual = qual.get('exact_n', 0) + qual.get('n_mismatch', 0)
-                if total_qual > 0:
-                    metrics['com_exact_ph2ev'] = 100 * qual.get('exact_com', 0) / total_qual
-                    metrics['com_good_ph2ev'] = 100 * qual.get('good_com', 0) / total_qual
+                # Use total CoM quality counts as denominator
+                total_com = (qual.get('exact_com', 0) + qual.get('good_com', 0) +
+                            qual.get('acceptable_com', 0) + qual.get('poor_com', 0))
+                if total_com > 0:
+                    metrics['com_exact_ph2ev'] = 100 * qual.get('exact_com', 0) / total_com
+                    metrics['com_good_ph2ev'] = 100 * qual.get('good_com', 0) / total_com
 
         return metrics
 
