@@ -958,10 +958,44 @@ class Analyse:
                 logger.info(f"After grouping: {self.associated_df[event_col].notna().sum()} photons with non-NaN {event_col}")
             else:
                 logger.warning("No photons with all non-NaN assoc columns for grouping")
+            # Compute and store statistics for this association
+            total_photons = len(self.associated_df)
+            matched_photons = self.associated_df[event_col].notna().sum()
+
+            # Count unique events
+            if event_col in self.associated_df.columns:
+                matched_events = int(self.associated_df[event_col].nunique())
+            else:
+                matched_events = 0
+
+            # Estimate total events (we don't have unmatched events data in this context)
+            total_events = matched_events
+
+            # Compute quality statistics if we have the necessary data
+            quality_stats = {'exact_n': 0, 'n_mismatch': 0, 'exact_com': 0, 'good_com': 0,
+                           'acceptable_com': 0, 'poor_com': 0}
+
+            # Check if we can compute quality stats
+            event_rows = self.associated_df[self.associated_df[event_col].notna()]
+
+            # Check n matching if available
+            if 'assoc_n' in event_rows.columns and 'n' in event_rows.columns:
+                event_rows_with_n = event_rows[(event_rows['assoc_n'].notna()) & (event_rows['n'].notna())]
+                if len(event_rows_with_n) > 0:
+                    quality_stats['exact_n'] = int((event_rows_with_n['assoc_n'] == event_rows_with_n['n']).sum())
+                    quality_stats['n_mismatch'] = int((event_rows_with_n['assoc_n'] != event_rows_with_n['n']).sum())
+
+            # Store statistics
+            self.last_photon_event_stats = {
+                'matched_photons': int(matched_photons),
+                'total_photons': int(total_photons),
+                'matched_events': int(matched_events),
+                'total_events': int(total_events),
+                'quality': quality_stats
+            }
+
             if verbosity >= 1:
-                total = len(self.associated_df)
-                matched = self.associated_df[event_col].notna().sum()
-                print(f"✅ Matched {matched} of {total} photons ({100 * matched / total:.1f}%)")
+                print(f"✅ Matched {matched_photons} of {total_photons} photons ({100 * matched_photons / total_photons:.1f}%)")
         else:
             self.associated_df = pd.DataFrame()
             logger.warning("No valid association results to concatenate")
@@ -1204,7 +1238,7 @@ class Analyse:
         # Auto-save results
         if len(self.associated_df) > 0:
             try:
-                output_path = self.save_associated_data(verbosity=verbosity)
+                output_path = self.save_associations(verbosity=verbosity)
                 if verbosity >= 1:
                     print(f"💾 Auto-saved results to: {output_path}")
             except Exception as e:
