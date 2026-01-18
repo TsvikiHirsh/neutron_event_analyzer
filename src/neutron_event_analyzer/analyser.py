@@ -1345,18 +1345,18 @@ class Analyse:
         This is used when loading pre-existing association results from CSV files.
 
         Args:
-            df: Associated DataFrame with columns like 'ev\\n', 'ph\\n', etc. (backslash notation)
+            df: Associated DataFrame with columns like 'ev/n', 'ph/n', etc. (forward slash notation)
 
         Returns:
             dict: Statistics dictionary with 'pixel_photon' and 'photon_event' keys
         """
         stats = {}
 
-        # Check what columns are available (handle backslash notation from CSV)
-        # Pixels can be represented as individual pixel columns (px\x, px\y, etc.)
-        has_pixels = any(col.startswith('px\\') for col in df.columns)
-        has_photons = 'ph\\n' in df.columns
-        has_events = 'ev\\n' in df.columns
+        # Check what columns are available (handle forward slash notation from CSV)
+        # Pixels can be represented as individual pixel columns (px/x, px/y, etc.)
+        has_pixels = any(col.startswith('px/') for col in df.columns)
+        has_photons = 'ph/n' in df.columns
+        has_events = 'ev/n' in df.columns
 
         # Note: Pixel-photon stats cannot be accurately reconstructed from association CSV
         # because the CSV doesn't contain info about unmatched pixels or the original pixel count.
@@ -1364,14 +1364,14 @@ class Analyse:
 
         # Compute photon-event stats if event data is present
         if has_photons and has_events:
-            # Count photons matched to events (rows with ev\id not null)
-            event_rows = df[df['ev\\id'].notna()]
+            # Count photons matched to events (rows with ev/id not null)
+            event_rows = df[df['ev/id'].notna()]
             matched_photons = len(event_rows)
             total_photons = len(df)
 
             # Count events (unique event IDs)
-            if 'ev\\id' in df.columns:
-                matched_events = int(df['ev\\id'].nunique())
+            if 'ev/id' in df.columns:
+                matched_events = int(df['ev/id'].nunique())
                 # Total events = matched events (we don't know unmatched events from CSV)
                 total_events = matched_events
             else:
@@ -1382,16 +1382,16 @@ class Analyse:
             quality_stats = {'exact_n': 0, 'n_mismatch': 0, 'exact_com': 0, 'good_com': 0,
                            'acceptable_com': 0, 'poor_com': 0}
 
-            # Check n matching (compare ev\n with ph\n)
-            if 'ev\\n' in df.columns and 'ph\\n' in df.columns:
-                event_rows_with_n = event_rows[(event_rows['ev\\n'].notna()) & (event_rows['ph\\n'].notna())]
+            # Check n matching (compare ev/n with ph/n)
+            if 'ev/n' in df.columns and 'ph/n' in df.columns:
+                event_rows_with_n = event_rows[(event_rows['ev/n'].notna()) & (event_rows['ph/n'].notna())]
                 if len(event_rows_with_n) > 0:
-                    quality_stats['exact_n'] = int((event_rows_with_n['ev\\n'] == event_rows_with_n['ph\\n']).sum())
-                    quality_stats['n_mismatch'] = int((event_rows_with_n['ev\\n'] != event_rows_with_n['ph\\n']).sum())
+                    quality_stats['exact_n'] = int((event_rows_with_n['ev/n'] == event_rows_with_n['ph/n']).sum())
+                    quality_stats['n_mismatch'] = int((event_rows_with_n['ev/n'] != event_rows_with_n['ph/n']).sum())
 
             # Check CoM quality - look for CoM distance columns
             com_col = None
-            for col in ['com_dist_ph2ev', 'ph\\com_dist', 'com_dist']:
+            for col in ['ev/cog', 'com_dist_ph2ev', 'com_dist']:
                 if col in df.columns:
                     com_col = col
                     break
@@ -2259,7 +2259,7 @@ class Analyse:
                 matched_events_total = aggregated_quality['exact_n'] + aggregated_quality['n_mismatch']
                 if matched_events_total > 0:
                     print(f"   Association Quality:")
-                    print(f"      Photon count matches ev\\n: {aggregated_quality['exact_n']:,} ({100 * aggregated_quality['exact_n'] / matched_events_total:.1f}%)")
+                    print(f"      Photon count matches ev/n: {aggregated_quality['exact_n']:,} ({100 * aggregated_quality['exact_n'] / matched_events_total:.1f}%)")
                     if aggregated_quality['n_mismatch'] > 0:
                         print(f"      Photon count mismatch:     {aggregated_quality['n_mismatch']:,} ({100 * aggregated_quality['n_mismatch'] / matched_events_total:.1f}%)")
                     print(f"   Center-of-Mass Match Quality:")
@@ -2542,7 +2542,7 @@ class Analyse:
             # Show quality statistics
             if matched_events > 0:
                 print(f"   Association Quality:")
-                print(f"      Photon count matches ev\\n: {quality_stats['exact_n']:,} ({100 * quality_stats['exact_n'] / matched_events:.1f}%)")
+                print(f"      Photon count matches ev/n: {quality_stats['exact_n']:,} ({100 * quality_stats['exact_n'] / matched_events:.1f}%)")
                 if quality_stats['n_mismatch'] > 0:
                     print(f"      Photon count mismatch:     {quality_stats['n_mismatch']:,} ({100 * quality_stats['n_mismatch'] / matched_events:.1f}%)")
                 print(f"   Center-of-Mass Match Quality:")
@@ -2747,7 +2747,7 @@ class Analyse:
             # Show quality statistics
             if matched_events > 0:
                 print(f"   Association Quality:")
-                print(f"      Photon count matches ev\\n: {quality_stats['exact_n']:,} ({100 * quality_stats['exact_n'] / matched_events:.1f}%)")
+                print(f"      Photon count matches ev/n: {quality_stats['exact_n']:,} ({100 * quality_stats['exact_n'] / matched_events:.1f}%)")
                 if quality_stats['n_mismatch'] > 0:
                     print(f"      Photon count mismatch:     {quality_stats['n_mismatch']:,} ({100 * quality_stats['n_mismatch'] / matched_events:.1f}%)")
                 print(f"   Center-of-Mass Match Quality:")
@@ -2925,7 +2925,7 @@ class Analyse:
             # Show quality statistics
             if matched_events > 0:
                 print(f"   Association Quality:")
-                print(f"      Photon count matches ev\\n: {quality_stats['exact_n']:,} ({100 * quality_stats['exact_n'] / matched_events:.1f}%)")
+                print(f"      Photon count matches ev/n: {quality_stats['exact_n']:,} ({100 * quality_stats['exact_n'] / matched_events:.1f}%)")
                 if quality_stats['n_mismatch'] > 0:
                     print(f"      Photon count mismatch:     {quality_stats['n_mismatch']:,} ({100 * quality_stats['n_mismatch'] / matched_events:.1f}%)")
                 print(f"   Center-of-Mass Match Quality:")
@@ -3344,9 +3344,9 @@ class Analyse:
         return pixels
 
     def _standardize_column_names(self, df, verbosity=0):
-        r"""
-        Standardize column names with prefixes: px\ for pixels, ph\ for photons, ev\ for events.
-        Also add ph\n column counting pixels per photon.
+        """
+        Standardize column names with prefixes: px/ for pixels, ph/ for photons, ev/ for events.
+        Also add ph/n column counting pixels per photon.
 
         Args:
             df (pd.DataFrame): DataFrame to standardize
@@ -3359,56 +3359,64 @@ class Analyse:
 
         # Pixel columns (original data)
         if 'x' in df.columns:
-            rename_map['x'] = 'px\\x'
+            rename_map['x'] = 'px/x'
         if 'y' in df.columns:
-            rename_map['y'] = 'px\\y'
+            rename_map['y'] = 'px/y'
         if 't' in df.columns:
-            rename_map['t'] = 'px\\toa'
+            rename_map['t'] = 'px/toa'
         if 'tot' in df.columns:
-            rename_map['tot'] = 'px\\tot'
+            rename_map['tot'] = 'px/tot'
         if 'tof' in df.columns:
-            rename_map['tof'] = 'px\\tof'
+            rename_map['tof'] = 'px/tof'
 
         # Photon association columns
         if 'assoc_photon_id' in df.columns:
-            rename_map['assoc_photon_id'] = 'ph\\id'
+            rename_map['assoc_photon_id'] = 'ph/id'
         if 'assoc_phot_x' in df.columns:
-            rename_map['assoc_phot_x'] = 'ph\\x'
+            rename_map['assoc_phot_x'] = 'ph/x'
         if 'assoc_phot_y' in df.columns:
-            rename_map['assoc_phot_y'] = 'ph\\y'
+            rename_map['assoc_phot_y'] = 'ph/y'
         if 'assoc_phot_t' in df.columns:
-            rename_map['assoc_phot_t'] = 'ph\\toa'
+            rename_map['assoc_phot_t'] = 'ph/toa'
 
-        # Pixel-photon difference columns
-        if 'pixel_time_diff_ns' in df.columns:
-            rename_map['pixel_time_diff_ns'] = 'px\\dt'
-        if 'pixel_spatial_diff_px' in df.columns:
-            rename_map['pixel_spatial_diff_px'] = 'px\\dr'
+        # Photon CoG distance (quality of pixel-to-photon association)
+        if 'assoc_com_dist' in df.columns:
+            rename_map['assoc_com_dist'] = 'ph/cog'
 
         # Event association columns
         if 'assoc_event_id' in df.columns:
-            rename_map['assoc_event_id'] = 'ev\\id'
+            rename_map['assoc_event_id'] = 'ev/id'
         if 'assoc_x' in df.columns:
-            rename_map['assoc_x'] = 'ev\\x'
+            rename_map['assoc_x'] = 'ev/x'
         if 'assoc_y' in df.columns:
-            rename_map['assoc_y'] = 'ev\\y'
+            rename_map['assoc_y'] = 'ev/y'
         if 'assoc_t' in df.columns:
-            rename_map['assoc_t'] = 'ev\\toa'
+            rename_map['assoc_t'] = 'ev/toa'
         if 'assoc_n' in df.columns:
-            rename_map['assoc_n'] = 'ev\\n'
+            rename_map['assoc_n'] = 'ev/n'
         if 'assoc_PSD' in df.columns:
-            rename_map['assoc_PSD'] = 'ev\\psd'
+            rename_map['assoc_PSD'] = 'ev/psd'
+
+        # Event CoG distance (quality of photon-to-event association)
+        if 'com_dist_ph2ev' in df.columns:
+            rename_map['com_dist_ph2ev'] = 'ev/cog'
 
         # Apply renaming
         df = df.rename(columns=rename_map)
 
-        # Add ph\n column: count of pixels per photon
-        if 'ph\\id' in df.columns:
-            photon_pixel_counts = df.groupby('ph\\id').size()
-            df['ph\\n'] = df['ph\\id'].map(photon_pixel_counts).fillna(0).astype(int)
+        # Drop unnecessary columns (time_diff_ns and spatial_diff_px)
+        cols_to_drop = ['pixel_time_diff_ns', 'pixel_spatial_diff_px', 'time_diff_ns', 'spatial_diff_px']
+        existing_drop_cols = [c for c in cols_to_drop if c in df.columns]
+        if existing_drop_cols:
+            df = df.drop(columns=existing_drop_cols)
+
+        # Add ph/n column: count of pixels per photon
+        if 'ph/id' in df.columns:
+            photon_pixel_counts = df.groupby('ph/id').size()
+            df['ph/n'] = df['ph/id'].map(photon_pixel_counts).fillna(0).astype(int)
 
             if verbosity >= 2:
-                print(f"Added ph\\n column: {df['ph\\n'].describe()}")
+                print(f"Added ph/n column: {df['ph/n'].describe()}")
 
         return df
 
@@ -3541,15 +3549,15 @@ class Analyse:
 
         # Determine column names based on id_type
         if id_type == 'ev':
-            # Use exported column names (ev\id) if available, otherwise internal names
-            if 'ev\\id' in self.associated_df.columns:
-                id_col = 'ev\\id'
+            # Use exported column names (ev/id) if available, otherwise internal names
+            if 'ev/id' in self.associated_df.columns:
+                id_col = 'ev/id'
             else:
                 id_col = 'assoc_cluster_id' if self.assoc_method == 'lumacam' else 'assoc_event_id'
         elif id_type == 'ph':
-            # Use exported column names (ph\id) if available, otherwise internal names
-            if 'ph\\id' in self.associated_df.columns:
-                id_col = 'ph\\id'
+            # Use exported column names (ph/id) if available, otherwise internal names
+            if 'ph/id' in self.associated_df.columns:
+                id_col = 'ph/id'
             else:
                 id_col = 'assoc_photon_id' if 'assoc_photon_id' in self.associated_df.columns else 'id'
         else:
@@ -3583,7 +3591,7 @@ class Analyse:
             data = self.associated_df[self.associated_df[id_col] == selected_id]
 
             if data.empty:
-                print(f"⚠️  No data found for {id_type}\\id = {selected_id}")
+                print(f"⚠️  No data found for {id_type}/id = {selected_id}")
                 continue
 
             # Create plot
@@ -3592,16 +3600,16 @@ class Analyse:
             # Determine what to plot based on id_type
             if id_type == 'ev':
                 # Plotting by event - show associated photons
-                # Use ph\x, ph\y if available (exported format), otherwise x, y
-                if 'ph\\x' in data.columns and 'ph\\y' in data.columns:
-                    ax.scatter(data['ph\\x'], data['ph\\y'], c='blue', label='Photons', alpha=0.6, s=50)
+                # Use ph/x, ph/y if available (exported format), otherwise x, y
+                if 'ph/x' in data.columns and 'ph/y' in data.columns:
+                    ax.scatter(data['ph/x'], data['ph/y'], c='blue', label='Photons', alpha=0.6, s=50)
                 else:
                     ax.scatter(data[x_col], data[y_col], c='blue', label='Photons', alpha=0.6, s=50)
 
                 # Plot event center if available
-                if 'ev\\x' in data.columns and 'ev\\y' in data.columns:
-                    ev_x = data['ev\\x'].iloc[0]
-                    ev_y = data['ev\\y'].iloc[0]
+                if 'ev/x' in data.columns and 'ev/y' in data.columns:
+                    ev_x = data['ev/x'].iloc[0]
+                    ev_y = data['ev/y'].iloc[0]
                     ax.scatter(ev_x, ev_y, c='red', marker='x', s=200, linewidths=3, label='Event Center')
                 elif 'assoc_x' in data.columns and 'assoc_y' in data.columns:
                     ev_x = data['assoc_x'].iloc[0]
@@ -3611,19 +3619,19 @@ class Analyse:
                 plot_title = title if title and len(ids_to_plot) == 1 else f'Event ID: {selected_id}'
 
                 # Add n count if available
-                if 'ev\\n' in data.columns:
-                    n_value = data['ev\\n'].iloc[0]
+                if 'ev/n' in data.columns:
+                    n_value = data['ev/n'].iloc[0]
                     plot_title += f' (n={int(n_value)})'
-                elif 'ph\\n' in data.columns:
-                    n_value = data['ph\\n'].iloc[0]
+                elif 'ph/n' in data.columns:
+                    n_value = data['ph/n'].iloc[0]
                     plot_title += f' (n={int(n_value)})'
 
             else:  # id_type == 'ph'
                 # Plotting by photon - show the photon and any associated pixels/events
                 # Plot photon position
-                if 'ph\\x' in data.columns and 'ph\\y' in data.columns:
-                    ph_x = data['ph\\x'].iloc[0]
-                    ph_y = data['ph\\y'].iloc[0]
+                if 'ph/x' in data.columns and 'ph/y' in data.columns:
+                    ph_x = data['ph/x'].iloc[0]
+                    ph_y = data['ph/y'].iloc[0]
                     ax.scatter(ph_x, ph_y, c='green', marker='o', s=200, label='Photon Center')
                 else:
                     ph_x = data[x_col].iloc[0]
@@ -3631,16 +3639,16 @@ class Analyse:
                     ax.scatter(ph_x, ph_y, c='green', marker='o', s=200, label='Photon Center')
 
                 # Plot associated pixels if available
-                if 'px\\x' in data.columns and 'px\\y' in data.columns:
-                    pixel_data = data[data['px\\x'].notna()]
+                if 'px/x' in data.columns and 'px/y' in data.columns:
+                    pixel_data = data[data['px/x'].notna()]
                     if not pixel_data.empty:
-                        ax.scatter(pixel_data['px\\x'], pixel_data['px\\y'], c='blue', marker='s',
+                        ax.scatter(pixel_data['px/x'], pixel_data['px/y'], c='blue', marker='s',
                                  s=100, alpha=0.5, label='Pixels')
 
                 # Plot associated event if available
-                if 'ev\\x' in data.columns and 'ev\\y' in data.columns:
-                    ev_x = data['ev\\x'].iloc[0]
-                    ev_y = data['ev\\y'].iloc[0]
+                if 'ev/x' in data.columns and 'ev/y' in data.columns:
+                    ev_x = data['ev/x'].iloc[0]
+                    ev_y = data['ev/y'].iloc[0]
                     if not pd.isna(ev_x):
                         ax.scatter(ev_x, ev_y, c='red', marker='x', s=200, linewidths=3, label='Event Center')
 
@@ -3657,16 +3665,16 @@ class Analyse:
             plt.show()
 
         if len(ids_to_plot) > 1:
-            print(f"✅ Plotted {len(ids_to_plot)} {id_type}\\id(s)")
+            print(f"✅ Plotted {len(ids_to_plot)} {id_type}/id(s)")
 
     def _rename_columns_for_export(self, df):
         """
         Rename columns to a clean, user-friendly naming scheme for export.
 
         Uses prefixes to identify data source:
-        - px\\* for pixel columns
-        - ph\\* for photon columns
-        - ev\\* for event columns
+        - px/* for pixel columns
+        - ph/* for photon columns
+        - ev/* for event columns
 
         Args:
             df (pd.DataFrame): Dataframe with association results.
@@ -3684,44 +3692,50 @@ class Analyse:
         # Create base mapping for association columns (same for all cases)
         rename_map = {
             # Pixel-photon association columns
-            'assoc_photon_id': 'ph\\id',
-            'assoc_phot_x': 'ph\\x',
-            'assoc_phot_y': 'ph\\y',
-            'assoc_phot_t': 'ph\\toa',
-            'pixel_time_diff_ns': 'px\\dt',
-            'pixel_spatial_diff_px': 'px\\dr',
+            'assoc_photon_id': 'ph/id',
+            'assoc_phot_x': 'ph/x',
+            'assoc_phot_y': 'ph/y',
+            'assoc_phot_t': 'ph/toa',
+            'assoc_com_dist': 'ph/cog',  # Pixel-photon CoG distance
 
             # Photon-event association columns
-            'assoc_event_id': 'ev\\id',
-            'assoc_cluster_id': 'ev\\id',  # For lumacam method
-            'assoc_x': 'ev\\x',
-            'assoc_y': 'ev\\y',
-            'assoc_t': 'ev\\toa',
-            'assoc_n': 'ev\\n',
-            'assoc_PSD': 'ev\\psd',
+            'assoc_event_id': 'ev/id',
+            'assoc_cluster_id': 'ev/id',  # For lumacam method
+            'assoc_x': 'ev/x',
+            'assoc_y': 'ev/y',
+            'assoc_t': 'ev/toa',
+            'assoc_n': 'ev/n',
+            'assoc_PSD': 'ev/psd',
+            'com_dist_ph2ev': 'ev/cog',  # Photon-event CoG distance
         }
 
         if has_pixel_data:
             # Pixel-centric data: x,y,t,tot,tof are pixel columns
             rename_map.update({
-                'x': 'px\\x',
-                'y': 'px\\y',
-                't': 'px\\toa',
-                'tot': 'px\\tot',
-                'tof': 'px\\tof',
+                'x': 'px/x',
+                'y': 'px/y',
+                't': 'px/toa',
+                'tot': 'px/tot',
+                'tof': 'px/tof',
             })
         else:
             # Photon-centric data: x,y,t,tof are photon columns
             rename_map.update({
-                'x': 'ph\\x',
-                'y': 'ph\\y',
-                't': 'ph\\toa',
-                'tof': 'ph\\tof',
+                'x': 'ph/x',
+                'y': 'ph/y',
+                't': 'ph/toa',
+                'tof': 'ph/tof',
             })
 
         # Only rename columns that exist in the dataframe
         cols_to_rename = {old: new for old, new in rename_map.items() if old in df_export.columns}
         df_export = df_export.rename(columns=cols_to_rename)
+
+        # Drop unnecessary columns (time_diff_ns and spatial_diff_px)
+        cols_to_drop = ['pixel_time_diff_ns', 'pixel_spatial_diff_px', 'time_diff_ns', 'spatial_diff_px']
+        existing_drop_cols = [c for c in cols_to_drop if c in df_export.columns]
+        if existing_drop_cols:
+            df_export = df_export.drop(columns=existing_drop_cols)
 
         return df_export
 
@@ -3745,41 +3759,42 @@ This directory contains neutron event analysis results with pixel-photon-event a
 ## Column Naming Convention
 
 Columns use prefixes to identify the data source:
-- `px\\*` - Pixel data (from Timepix3 detector)
-- `ph\\*` - Photon data (from scintillator)
-- `ev\\*` - Event data (neutron events)
+- `px/*` - Pixel data (from Timepix3 detector)
+- `ph/*` - Photon data (from scintillator)
+- `ev/*` - Event data (neutron events)
 
 ## Column Definitions
 
-### Pixel Columns (px\\*)
+### Pixel Columns (px/*)
 | Column | Description | Units |
 |--------|-------------|-------|
-| `px\\x` | Pixel x-coordinate | pixels |
-| `px\\y` | Pixel y-coordinate | pixels |
-| `px\\toa` | Pixel time of arrival | seconds |
-| `px\\tot` | Pixel time over threshold | seconds |
-| `px\\tof` | Pixel time of flight | seconds |
-| `px\\dt` | Time difference to associated photon | nanoseconds |
-| `px\\dr` | Spatial distance to associated photon | pixels |
+| `px/x` | Pixel x-coordinate | pixels |
+| `px/y` | Pixel y-coordinate | pixels |
+| `px/toa` | Pixel time of arrival | seconds |
+| `px/tot` | Pixel time over threshold | seconds |
+| `px/tof` | Pixel time of flight | seconds |
 
-### Photon Columns (ph\\*)
+### Photon Columns (ph/*)
 | Column | Description | Units |
 |--------|-------------|-------|
-| `ph\\x` | Photon x-coordinate | pixels |
-| `ph\\y` | Photon y-coordinate | pixels |
-| `ph\\toa` | Photon time of arrival | seconds |
-| `ph\\tof` | Photon time of flight | seconds |
-| `ph\\id` | Associated photon ID | - |
+| `ph/x` | Photon x-coordinate | pixels |
+| `ph/y` | Photon y-coordinate | pixels |
+| `ph/toa` | Photon time of arrival | seconds |
+| `ph/tof` | Photon time of flight | seconds |
+| `ph/id` | Associated photon ID | - |
+| `ph/n` | Number of pixels in photon | - |
+| `ph/cog` | Distance from photon CoG to pixel CoM | pixels |
 
-### Event Columns (ev\\*)
+### Event Columns (ev/*)
 | Column | Description | Units |
 |--------|-------------|-------|
-| `ev\\x` | Event center-of-mass x-coordinate | pixels |
-| `ev\\y` | Event center-of-mass y-coordinate | pixels |
-| `ev\\toa` | Event time of arrival | seconds |
-| `ev\\n` | Number of photons in event | - |
-| `ev\\psd` | Pulse shape discrimination value | - |
-| `ev\\id` | Associated event ID | - |
+| `ev/x` | Event center-of-mass x-coordinate | pixels |
+| `ev/y` | Event center-of-mass y-coordinate | pixels |
+| `ev/toa` | Event time of arrival | seconds |
+| `ev/n` | Number of photons in event | - |
+| `ev/psd` | Pulse shape discrimination value | - |
+| `ev/id` | Associated event ID | - |
+| `ev/cog` | Distance from event CoG to photon CoM | pixels |
 
 ## Data Structure
 
@@ -3787,32 +3802,33 @@ Depending on which data types were loaded and associated, the CSV files contain:
 
 ### Full 3-Tier Association (Pixels → Photons → Events)
 - One row per pixel
-- Each pixel may be associated with a photon (`ph\\id`)
-- Each photon may be associated with an event (`ev\\id`)
-- Contains all `px\\*`, `ph\\*`, and `ev\\*` columns
+- Each pixel may be associated with a photon (`ph/id`)
+- Each photon may be associated with an event (`ev/id`)
+- Contains all `px/*`, `ph/*`, and `ev/*` columns
 
 ### Photon-Event Association Only
 - One row per photon
-- Each photon may be associated with an event (`ev\\id`)
-- Contains `ph\\*` and `ev\\*` columns only
+- Each photon may be associated with an event (`ev/id`)
+- Contains `ph/*` and `ev/*` columns only
 
 ### Pixel-Photon Association Only
 - One row per pixel
-- Each pixel may be associated with a photon (`ph\\id`)
-- Contains `px\\*` and `ph\\*` columns only
+- Each pixel may be associated with a photon (`ph/id`)
+- Contains `px/*` and `ph/*` columns only
 
 ## Missing Values
 
 - Unassociated entries have `NaN` (Not a Number) values in association columns
-- For example, pixels without a matched photon will have `NaN` in `ph\\id`, `ph\\x`, `ph\\y`, etc.
+- For example, pixels without a matched photon will have `NaN` in `ph/id`, `ph/x`, `ph/y`, etc.
 
 ## Units Summary
 
 - **Position**: pixels (coordinate system depends on detector configuration)
-- **Time**: seconds (for toa/tof), nanoseconds (for dt)
+- **Time**: seconds (for toa/tof)
 - **IDs**: Integer identifiers (0-indexed)
-- **Counts**: Integer values (for ev\\n)
+- **Counts**: Integer values (for ev/n, ph/n)
 - **PSD**: Dimensionless discrimination value (typically 0-1)
+- **CoG**: Center-of-gravity/mass distance in pixels
 
 ## Analysis Workflow
 
@@ -4314,13 +4330,13 @@ For more information, see: https://github.com/nuclear/neutron_event_analyzer
 
             # Grouped analysis - compare photon stats across groups
             assoc = nea.Analyse("archive/pencilbeam1/detector_model/")
-            assoc.plot_violin(y="px\\toa", title="Pixel time spread per photon")
+            assoc.plot_violin(y="px/toa", title="Pixel time spread per photon")
 
             # Grouped analysis - compare event stats across groups
-            assoc.plot_violin(groupby='events', y="ph\\n", title="Photons per event")
+            assoc.plot_violin(groupby='events', y="ph/n", title="Photons per event")
 
             # Plot multiple metrics with custom limits
-            assoc.plot_violin(y=["px\\x", "px\\y", "px\\tot"], ylim=(-1, 5))
+            assoc.plot_violin(y=["px/x", "px/y", "px/tot"], ylim=(-1, 5))
         """
         import matplotlib.pyplot as plt
         import seaborn as sns
@@ -4344,22 +4360,22 @@ For more information, see: https://github.com/nuclear/neutron_event_analyzer
         # Define available metrics based on groupby
         if groupby == 'photons':
             available_metrics = {
-                'px\\x': ('px\\x', 'std', 'Pixel X std (px)'),
-                'px\\y': ('px\\y', 'std', 'Pixel Y std (px)'),
-                'px\\tot': ('px\\tot', 'std', 'Pixel ToT std (s)'),
-                'px\\n': ('ph\\id', 'count', 'Pixels per photon'),
-                'px\\toa': ('px\\toa', 'std', f'Pixel ToA std ({1e9/time_scale:.0f}ns)')
+                'px/x': ('px/x', 'std', 'Pixel X std (px)'),
+                'px/y': ('px/y', 'std', 'Pixel Y std (px)'),
+                'px/tot': ('px/tot', 'std', 'Pixel ToT std (s)'),
+                'px/n': ('ph/id', 'count', 'Pixels per photon'),
+                'px/toa': ('px/toa', 'std', f'Pixel ToA std ({1e9/time_scale:.0f}ns)')
             }
-            group_col = 'ph\\id'
+            group_col = 'ph/id'
         else:  # groupby == 'events'
             available_metrics = {
-                'ph\\x': ('ph\\x', 'std', 'Photon X std (px)'),
-                'ph\\y': ('ph\\y', 'std', 'Photon Y std (px)'),
-                'ph\\n': ('ev\\id', 'count', 'Photons per event'),
-                'ph\\toa': ('ph\\toa', 'std', f'Photon ToA std ({1e9/time_scale:.0f}ns)'),
-                'ev\\psd': ('ev\\psd', 'mean', 'Event PSD')
+                'ph/x': ('ph/x', 'std', 'Photon X std (px)'),
+                'ph/y': ('ph/y', 'std', 'Photon Y std (px)'),
+                'ph/n': ('ev/id', 'count', 'Photons per event'),
+                'ph/toa': ('ph/toa', 'std', f'Photon ToA std ({1e9/time_scale:.0f}ns)'),
+                'ev/psd': ('ev/psd', 'mean', 'Event PSD')
             }
-            group_col = 'ev\\id'
+            group_col = 'ev/id'
 
         # Handle y parameter
         if y is None:
@@ -4408,7 +4424,7 @@ For more information, see: https://github.com/nuclear/neutron_event_analyzer
 
                     # Compute statistics based on aggregation function
                     if agg_func == 'std':
-                        if metric in ['px\\toa', 'ph\\toa']:
+                        if metric in ['px/toa', 'ph/toa']:
                             stats = group_df.groupby(group_col)[col].std() * time_scale
                         else:
                             stats = group_df.groupby(group_col)[col].std()
@@ -4494,7 +4510,7 @@ For more information, see: https://github.com/nuclear/neutron_event_analyzer
 
                 # Compute statistics based on aggregation function
                 if agg_func == 'std':
-                    if metric in ['px\\toa', 'ph\\toa']:
+                    if metric in ['px/toa', 'ph/toa']:
                         stats = df.groupby(group_col)[col].std() * time_scale
                     else:
                         stats = df.groupby(group_col)[col].std()
@@ -4563,7 +4579,7 @@ For more information, see: https://github.com/nuclear/neutron_event_analyzer
         return plot_files if len(plot_files) > 1 else (list(plot_files.values())[0] if plot_files else None)
 
     def get_violin_stats(self, groupby='photons', time_scale=1e7):
-        r"""
+        """
         Compute per-photon or per-event statistics for all groups (helper method for violin plots).
 
         This method computes the same statistics as plot_violin() but returns them as
@@ -4575,8 +4591,8 @@ For more information, see: https://github.com/nuclear/neutron_event_analyzer
 
         Returns:
             dict: Dictionary mapping group names to DataFrames with statistics.
-                  For groupby='photons': columns are px\x, px\y, px\tot, px\n, px\toa
-                  For groupby='events': columns are ph\x, ph\y, ph\n, ph\toa, ev\psd
+                  For groupby='photons': columns are px/x, px/y, px/tot, px/n, px/toa
+                  For groupby='events': columns are ph/x, ph/y, ph/n, ph/toa, ev/psd
 
         Raises:
             ValueError: If no grouped association data is available.
@@ -4587,11 +4603,11 @@ For more information, see: https://github.com/nuclear/neutron_event_analyzer
 
             # Get per-photon statistics
             photon_stats = assoc.get_violin_stats(groupby='photons')
-            print(photon_stats['full_physics']['px\\x'].describe())
+            print(photon_stats['full_physics']['px/x'].describe())
 
             # Get per-event statistics
             event_stats = assoc.get_violin_stats(groupby='events')
-            print(event_stats['full_physics']['ph\\n'].describe())
+            print(event_stats['full_physics']['ph/n'].describe())
         """
         import pandas as pd
 
@@ -4602,7 +4618,7 @@ For more information, see: https://github.com/nuclear/neutron_event_analyzer
             raise ValueError(f"groupby must be 'photons' or 'events', got '{groupby}'")
 
         all_stats = {}
-        group_col = 'ph\\id' if groupby == 'photons' else 'ev\\id'
+        group_col = 'ph/id' if groupby == 'photons' else 'ev/id'
 
         for group_name, group_df in self.groupby_results.items():
             if group_col not in group_df.columns:
@@ -4613,55 +4629,55 @@ For more information, see: https://github.com/nuclear/neutron_event_analyzer
 
             if groupby == 'photons':
                 # Compute per-photon statistics
-                # px\x std
-                if 'px\\x' in group_df.columns:
-                    stats_list.append(group_df.groupby(group_col)['px\\x'].std())
-                    col_names.append('px\\x')
+                # px/x std
+                if 'px/x' in group_df.columns:
+                    stats_list.append(group_df.groupby(group_col)['px/x'].std())
+                    col_names.append('px/x')
 
-                # px\y std
-                if 'px\\y' in group_df.columns:
-                    stats_list.append(group_df.groupby(group_col)['px\\y'].std())
-                    col_names.append('px\\y')
+                # px/y std
+                if 'px/y' in group_df.columns:
+                    stats_list.append(group_df.groupby(group_col)['px/y'].std())
+                    col_names.append('px/y')
 
-                # px\tot std
-                if 'px\\tot' in group_df.columns:
-                    stats_list.append(group_df.groupby(group_col)['px\\tot'].std())
-                    col_names.append('px\\tot')
+                # px/tot std
+                if 'px/tot' in group_df.columns:
+                    stats_list.append(group_df.groupby(group_col)['px/tot'].std())
+                    col_names.append('px/tot')
 
-                # px\n count
+                # px/n count
                 stats_list.append(group_df.groupby(group_col)[group_col].count())
-                col_names.append('px\\n')
+                col_names.append('px/n')
 
-                # px\toa std (scaled)
-                if 'px\\toa' in group_df.columns:
-                    stats_list.append(group_df.groupby(group_col)['px\\toa'].std() * time_scale)
-                    col_names.append(f'px\\toa [{1e9/time_scale:.0f}ns]')
+                # px/toa std (scaled)
+                if 'px/toa' in group_df.columns:
+                    stats_list.append(group_df.groupby(group_col)['px/toa'].std() * time_scale)
+                    col_names.append(f'px/toa [{1e9/time_scale:.0f}ns]')
 
             else:  # groupby == 'events'
                 # Compute per-event statistics
-                # ph\x std
-                if 'ph\\x' in group_df.columns:
-                    stats_list.append(group_df.groupby(group_col)['ph\\x'].std())
-                    col_names.append('ph\\x')
+                # ph/x std
+                if 'ph/x' in group_df.columns:
+                    stats_list.append(group_df.groupby(group_col)['ph/x'].std())
+                    col_names.append('ph/x')
 
-                # ph\y std
-                if 'ph\\y' in group_df.columns:
-                    stats_list.append(group_df.groupby(group_col)['ph\\y'].std())
-                    col_names.append('ph\\y')
+                # ph/y std
+                if 'ph/y' in group_df.columns:
+                    stats_list.append(group_df.groupby(group_col)['ph/y'].std())
+                    col_names.append('ph/y')
 
-                # ph\n count
+                # ph/n count
                 stats_list.append(group_df.groupby(group_col)[group_col].count())
-                col_names.append('ph\\n')
+                col_names.append('ph/n')
 
-                # ph\toa std (scaled)
-                if 'ph\\toa' in group_df.columns:
-                    stats_list.append(group_df.groupby(group_col)['ph\\toa'].std() * time_scale)
-                    col_names.append(f'ph\\toa [{1e9/time_scale:.0f}ns]')
+                # ph/toa std (scaled)
+                if 'ph/toa' in group_df.columns:
+                    stats_list.append(group_df.groupby(group_col)['ph/toa'].std() * time_scale)
+                    col_names.append(f'ph/toa [{1e9/time_scale:.0f}ns]')
 
-                # ev\psd mean
-                if 'ev\\psd' in group_df.columns:
-                    stats_list.append(group_df.groupby(group_col)['ev\\psd'].mean())
-                    col_names.append('ev\\psd')
+                # ev/psd mean
+                if 'ev/psd' in group_df.columns:
+                    stats_list.append(group_df.groupby(group_col)['ev/psd'].mean())
+                    col_names.append('ev/psd')
 
             # Combine into DataFrame
             if stats_list:
