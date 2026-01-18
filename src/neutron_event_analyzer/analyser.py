@@ -369,16 +369,28 @@ class Analyse:
 
     def load(self, event_glob="[Ee]ventFiles/*.empirevent", photon_glob="[Pp]hotonFiles/*.empirphot",
              pixel_glob="[Tt]px3Files/*.tpx3", events=True, photons=True, pixels=False,
-             limit=None, query=None, verbosity=0,
+             limit=None, query=None, relax=1.0, verbosity=0,
              # Backward compatibility - deprecated
              load_events=None, load_photons=None, load_pixels=None):
         """
-        Load paired event, photon, and optionally pixel files.
+        Load paired event, photon, and optionally pixel files with smart cascading limits.
 
         This method identifies paired files based on matching base filenames (excluding extensions).
         For each file, it first checks for pre-exported CSV files in ExportedEvents/ExportedPhotons/ExportedPixels folders.
         If CSV files exist, they are used directly. Otherwise, it falls back to converting the original
         files using empir binaries.
+
+        The limit parameter now uses cascading logic to ensure enough downstream data is loaded
+        for proper association:
+
+        - **Integer limit**: Interpreted as row count for the primary data type.
+          - If pixels loaded: limit applies to pixels, photons loaded up to max_pixel_toa + buffer,
+            events loaded up to max_photon_toa + buffer.
+          - If only photons+events: limit applies to photons, events loaded up to max_photon_toa + buffer.
+          - If only pixels+photons: limit applies to pixels, photons loaded up to max_pixel_toa + buffer.
+
+        - **Float limit**: Interpreted as max time-of-arrival (TOA) in seconds.
+          - Primary data filtered to t <= limit, downstream data uses cascading logic.
 
         Args:
             event_glob (str, optional): Glob pattern relative to data_folder for event files.
@@ -387,8 +399,12 @@ class Analyse:
             events (bool, optional): Whether to load events (default: True).
             photons (bool, optional): Whether to load photons (default: True).
             pixels (bool, optional): Whether to load pixels (default: False).
-            limit (int, optional): If provided, limit the number of rows loaded for all data types.
+            limit (int or float, optional): If int, limits row count for primary data type.
+                                           If float, limits max TOA in seconds.
+                                           Downstream data uses cascading limits based on time search windows.
             query (str, optional): If provided, apply a pandas query string to filter the events dataframe (e.g., "n>2").
+            relax (float, optional): Relaxation factor for time buffers in cascading limits. Default is 1.0.
+                                    Higher values load more downstream data for safety margin.
             verbosity (int, optional): Verbosity level (0=silent, 1=normal, 2=debug). Default is 0.
         """
         # Backward compatibility with old parameter names
@@ -505,30 +521,8 @@ class Analyse:
                 if verbosity >= 2:
                     print(f"Applied query '{query}': {original_events_len} -> {len(self.events_df)} events")
 
-            # Apply limit if provided
-            if limit is not None:
-                if events and len(self.events_df) > 0:
-                    self.events_df = self.events_df.head(limit)
-                if photons and len(self.photons_df) > 0:
-                    self.photons_df = self.photons_df.head(limit)
-                if verbosity >= 2:
-                    print(f"Applied limit of {limit} rows.")
-
-            # Update pair_dfs to reflect the filtered data for association
-            if query is not None or limit is not None:
-                if events and photons:
-                    self.pair_dfs = [(self.events_df, self.photons_df)]
-                    if verbosity >= 2:
-                        print(f"Updated pair_dfs with filtered data for association.")
-
-            if events or photons:
-                status_parts = []
-                if load_events:
-                    status_parts.append(f"{len(self.events_df)} events")
-                if load_photons:
-                    status_parts.append(f"{len(self.photons_df)} photons")
-                if verbosity >= 2:
-                    print(f"Loaded {' and '.join(status_parts)} in total.")
+            # NOTE: Limit application is deferred until after all data is loaded
+            # to enable cascading limits (see end of load() method)
 
         # Load pixels if requested
         if pixels:
@@ -565,15 +559,158 @@ class Analyse:
             if pixel_dfs:
                 self.pixels_df = pd.concat(pixel_dfs, ignore_index=True).replace(" nan", float("nan"))
 
-                # Apply limit if provided
-                if limit is not None:
-                    self.pixels_df = self.pixels_df.head(limit)
+                # NOTE: Limit application is deferred until after all data is loaded
+                # to enable cascading limits (see end of load() method)
 
                 if verbosity >= 1:
                     print(f"Loaded {len(self.pixels_df)} pixels in total.")
             else:
                 logger.error("No pixel data could be loaded. Check that ExportedPixels folder exists or empir binaries are available.")
                 self.pixels_df = pd.DataFrame()
+
+        # Apply cascading limits after all data is loaded
+        self._apply_cascading_limits(limit=limit, relax=relax, verbosity=verbosity)
+
+        # Update pair_dfs to reflect the filtered data for association
+        if limit is not None or query is not None:
+            if events and photons:
+                self.pair_dfs = [(self.events_df, self.photons_df)]
+
+    def _apply_cascading_limits(self, limit, relax=1.0, verbosity=0):
+        """
+        Apply cascading limits to loaded data based on data types and time windows.
+
+        This method implements smart limit logic:
+        - Integer limit: Row count for primary data, time-based cascading for downstream
+        - Float limit: Max TOA for primary data, time-based cascading for downstream
+
+        The cascading ensures downstream data extends beyond primary data's max TOA
+        by the appropriate time search window to enable proper association.
+
+        Args:
+            limit (int, float, or None): Row limit (int) or max TOA in seconds (float)
+            relax (float): Relaxation factor for time buffers (default 1.0)
+            verbosity (int): Verbosity level
+        """
+        if limit is None:
+            return
+
+        # Get association time parameters from settings
+        defaults = self._get_association_defaults()
+        pixel_max_time_ns = defaults.get('pixel_max_time_ns', 500) * relax
+        photon_max_time_ns = defaults.get('max_time_ns', 500) * relax
+
+        # Convert to seconds for time comparisons
+        pixel_time_buffer_s = pixel_max_time_ns / 1e9
+        photon_time_buffer_s = photon_max_time_ns / 1e9
+
+        # Determine if limit is row-based (int) or time-based (float)
+        limit_is_time = isinstance(limit, float)
+
+        # Determine what data we have
+        has_pixels = self.pixels_df is not None and len(self.pixels_df) > 0
+        has_photons = self.photons_df is not None and len(self.photons_df) > 0
+        has_events = self.events_df is not None and len(self.events_df) > 0
+
+        if verbosity >= 2:
+            limit_type = "time (TOA)" if limit_is_time else "rows"
+            print(f"\n📊 Applying cascading limits (limit={limit}, type={limit_type}, relax={relax})")
+
+        # Case 1: Full 3-tier (pixels → photons → events)
+        if has_pixels and has_photons and has_events:
+            # Pixels are primary - apply limit directly
+            if limit_is_time:
+                original_len = len(self.pixels_df)
+                self.pixels_df = self.pixels_df[self.pixels_df['t'] <= limit].copy()
+                if verbosity >= 2:
+                    print(f"   Pixels: {original_len:,} → {len(self.pixels_df):,} (t <= {limit:.6f}s)")
+            else:
+                original_len = len(self.pixels_df)
+                self.pixels_df = self.pixels_df.head(int(limit)).copy()
+                if verbosity >= 2:
+                    print(f"   Pixels: {original_len:,} → {len(self.pixels_df):,} (first {int(limit)} rows)")
+
+            # Cascade to photons: use max pixel TOA + buffer
+            if len(self.pixels_df) > 0:
+                max_pixel_toa = self.pixels_df['t'].max()
+                photon_toa_limit = max_pixel_toa + pixel_time_buffer_s
+                original_len = len(self.photons_df)
+                self.photons_df = self.photons_df[self.photons_df['t'] <= photon_toa_limit].copy()
+                if verbosity >= 2:
+                    print(f"   Photons: {original_len:,} → {len(self.photons_df):,} (t <= {photon_toa_limit:.6f}s, max_pixel_toa + {pixel_time_buffer_s*1e9:.0f}ns)")
+
+            # Cascade to events: use max photon TOA + buffer
+            if len(self.photons_df) > 0:
+                max_photon_toa = self.photons_df['t'].max()
+                event_toa_limit = max_photon_toa + photon_time_buffer_s
+                original_len = len(self.events_df)
+                self.events_df = self.events_df[self.events_df['t'] <= event_toa_limit].copy()
+                if verbosity >= 2:
+                    print(f"   Events: {original_len:,} → {len(self.events_df):,} (t <= {event_toa_limit:.6f}s, max_photon_toa + {photon_time_buffer_s*1e9:.0f}ns)")
+
+        # Case 2: Pixels → Photons only
+        elif has_pixels and has_photons:
+            # Pixels are primary
+            if limit_is_time:
+                original_len = len(self.pixels_df)
+                self.pixels_df = self.pixels_df[self.pixels_df['t'] <= limit].copy()
+                if verbosity >= 2:
+                    print(f"   Pixels: {original_len:,} → {len(self.pixels_df):,} (t <= {limit:.6f}s)")
+            else:
+                original_len = len(self.pixels_df)
+                self.pixels_df = self.pixels_df.head(int(limit)).copy()
+                if verbosity >= 2:
+                    print(f"   Pixels: {original_len:,} → {len(self.pixels_df):,} (first {int(limit)} rows)")
+
+            # Cascade to photons
+            if len(self.pixels_df) > 0:
+                max_pixel_toa = self.pixels_df['t'].max()
+                photon_toa_limit = max_pixel_toa + pixel_time_buffer_s
+                original_len = len(self.photons_df)
+                self.photons_df = self.photons_df[self.photons_df['t'] <= photon_toa_limit].copy()
+                if verbosity >= 2:
+                    print(f"   Photons: {original_len:,} → {len(self.photons_df):,} (t <= {photon_toa_limit:.6f}s)")
+
+        # Case 3: Photons → Events only
+        elif has_photons and has_events:
+            # Photons are primary
+            if limit_is_time:
+                original_len = len(self.photons_df)
+                self.photons_df = self.photons_df[self.photons_df['t'] <= limit].copy()
+                if verbosity >= 2:
+                    print(f"   Photons: {original_len:,} → {len(self.photons_df):,} (t <= {limit:.6f}s)")
+            else:
+                original_len = len(self.photons_df)
+                self.photons_df = self.photons_df.head(int(limit)).copy()
+                if verbosity >= 2:
+                    print(f"   Photons: {original_len:,} → {len(self.photons_df):,} (first {int(limit)} rows)")
+
+            # Cascade to events
+            if len(self.photons_df) > 0:
+                max_photon_toa = self.photons_df['t'].max()
+                event_toa_limit = max_photon_toa + photon_time_buffer_s
+                original_len = len(self.events_df)
+                self.events_df = self.events_df[self.events_df['t'] <= event_toa_limit].copy()
+                if verbosity >= 2:
+                    print(f"   Events: {original_len:,} → {len(self.events_df):,} (t <= {event_toa_limit:.6f}s)")
+
+        # Case 4: Single data type - apply limit directly
+        else:
+            if has_pixels:
+                if limit_is_time:
+                    self.pixels_df = self.pixels_df[self.pixels_df['t'] <= limit].copy()
+                else:
+                    self.pixels_df = self.pixels_df.head(int(limit)).copy()
+            if has_photons:
+                if limit_is_time:
+                    self.photons_df = self.photons_df[self.photons_df['t'] <= limit].copy()
+                else:
+                    self.photons_df = self.photons_df.head(int(limit)).copy()
+            if has_events:
+                if limit_is_time:
+                    self.events_df = self.events_df[self.events_df['t'] <= limit].copy()
+                else:
+                    self.events_df = self.events_df.head(int(limit)).copy()
 
     def _convert_event_file(self, eventfile, tmp_dir, verbosity=0):
         """
