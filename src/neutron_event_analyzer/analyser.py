@@ -985,6 +985,41 @@ class Analyse:
                     quality_stats['exact_n'] = int((event_rows_with_n['assoc_n'] == event_rows_with_n['n']).sum())
                     quality_stats['n_mismatch'] = int((event_rows_with_n['assoc_n'] != event_rows_with_n['n']).sum())
 
+            # Compute CoM quality if we have photon and event coordinates
+            # Group by event to compute center-of-mass for each event's photons
+            if len(event_rows) > 0 and all(col in event_rows.columns for col in ['x', 'y', 'assoc_x', 'assoc_y']):
+                # For each event, compute the center of mass of its photons
+                for event_id in event_rows[event_col].unique():
+                    if pd.isna(event_id):
+                        continue
+
+                    event_photons = event_rows[event_rows[event_col] == event_id]
+                    if len(event_photons) == 0:
+                        continue
+
+                    # Compute center of mass of photons
+                    photon_com_x = event_photons['x'].mean()
+                    photon_com_y = event_photons['y'].mean()
+
+                    # Get event position (should be same for all rows of this event)
+                    event_x = event_photons['assoc_x'].iloc[0]
+                    event_y = event_photons['assoc_y'].iloc[0]
+
+                    # Compute CoM distance
+                    com_dist = np.sqrt((photon_com_x - event_x)**2 + (photon_com_y - event_y)**2)
+
+                    # Categorize quality (use dSpace_px parameter as search radius)
+                    search_radius = dSpace_px if dSpace_px != np.inf else 50.0
+
+                    if com_dist <= 0.1:  # Within 0.1 pixel
+                        quality_stats['exact_com'] += 1
+                    elif com_dist <= search_radius * 0.3:  # Within 30% of search radius
+                        quality_stats['good_com'] += 1
+                    elif com_dist <= search_radius * 0.5:  # Within 50% of search radius
+                        quality_stats['acceptable_com'] += 1
+                    else:  # Within search radius but >50%
+                        quality_stats['poor_com'] += 1
+
             # Store statistics
             self.last_photon_event_stats = {
                 'matched_photons': int(matched_photons),
