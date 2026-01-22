@@ -4065,7 +4065,7 @@ For more information, see: https://github.com/nuclear/neutron_event_analyzer
 
         return output_path
 
-    def plot_stats(self, output_dir=None, verbosity=None, group=None):
+    def plot_stats(self, output_dir=None, verbosity=None, group=None, inline=False):
         """
         Generate comprehensive association quality plots.
 
@@ -4081,22 +4081,31 @@ For more information, see: https://github.com/nuclear/neutron_event_analyzer
 
         Args:
             output_dir (str, optional): Output directory for plots. If None, uses 'AssociatedResults' folder.
-            verbosity (int, optional): Verbosity level. If None, uses instance verbosity.
+            verbosity (int, optional): Verbosity level (0=silent, 1=summary, 2=debug). If None, uses instance verbosity.
             group (str, optional): For groupby structures, specify which group to plot.
                                   If None, plots all groups. Ignored for single folders.
+            inline (bool): If True, returns a matplotlib figure for inline display (e.g., Jupyter).
+                          If False, saves plots to files and returns file paths. Default: False.
 
         Returns:
-            dict or list: For groupby, dict mapping group names to plot file lists.
-                         For single folder, list of plot file paths.
+            If inline=False:
+                dict or list: For groupby, dict mapping group names to plot file lists.
+                             For single folder, list of plot file paths.
+            If inline=True:
+                matplotlib.figure.Figure: Combined figure with all plots for inline display.
 
         Raises:
             ValueError: If no association has been performed yet.
 
         Example:
-            # Single folder
+            # Single folder - save to files
             assoc = nea.Analyse("data/single/")
             assoc.associate(relax=1.5)
             plots = assoc.plot_stats()
+
+            # Single folder - inline display
+            fig = assoc.plot_stats(inline=True)
+            plt.show()
 
             # Grouped folders - all groups
             assoc = nea.Analyse("data/grouped/")
@@ -4133,14 +4142,17 @@ For more information, see: https://github.com/nuclear/neutron_event_analyzer
                 self.data_folder = os.path.join(original_folder, group)
 
                 try:
-                    result = self._plot_stats_single(output_dir, verbosity)
+                    result = self._plot_stats_single(output_dir, verbosity, inline=inline)
                 finally:
                     self.associated_df = original_df
                     self.data_folder = original_folder
 
                 return result
 
-            # Plot all groups
+            # Plot all groups (inline not supported for multiple groups)
+            if inline:
+                raise ValueError("inline=True not supported when plotting all groups. Specify a single group with the 'group' parameter.")
+
             all_results = {}
             if verbosity >= 1:
                 print(f"\n📊 Generating plots for {len(self.groupby_results)} groups...")
@@ -4160,7 +4172,7 @@ For more information, see: https://github.com/nuclear/neutron_event_analyzer
                     else:
                         group_output_dir = os.path.join(output_dir, group_name)
 
-                    result = self._plot_stats_single(group_output_dir, 0)  # Suppress individual messages
+                    result = self._plot_stats_single(group_output_dir, 0, inline=False)  # Suppress individual messages
                     all_results[group_name] = result
 
                     if verbosity >= 2:
@@ -4178,73 +4190,170 @@ For more information, see: https://github.com/nuclear/neutron_event_analyzer
         if self.associated_df is None or len(self.associated_df) == 0:
             raise ValueError("No association data to plot. Run associate() first.")
 
-        return self._plot_stats_single(output_dir, verbosity)
+        return self._plot_stats_single(output_dir, verbosity, inline=inline)
 
-    def _plot_stats_single(self, output_dir=None, verbosity=1):
+    def _plot_stats_single(self, output_dir=None, verbosity=1, inline=False):
         """
         Internal method to generate plots for a single dataset.
 
         Args:
-            output_dir (str, optional): Output directory for plots.
-            verbosity (int): Verbosity level.
+            output_dir (str, optional): Output directory for plots (ignored if inline=True).
+            verbosity (int): Verbosity level (0=silent, 1=summary, 2=debug).
+            inline (bool): If True, returns a combined figure for inline display.
 
         Returns:
-            list: Paths to generated plot files.
+            If inline=False: list of paths to generated plot files.
+            If inline=True: matplotlib.figure.Figure with combined plots.
         """
         import matplotlib.pyplot as plt
         import seaborn as sns
         import numpy as np
-        
-        # Determine output directory
-        if output_dir is None:
-            output_dir = os.path.join(self.data_folder, "AssociatedResults")
-        
-        os.makedirs(output_dir, exist_ok=True)
-        
+
         # Set seaborn style
         sns.set_theme(style="whitegrid")
-        plot_files = []
-        
+
         df = self.associated_df
-        
+
+        # Check for event ID column (new format: ev/id, old format: assoc_event_id or assoc_cluster_id)
+        if 'ev/id' in df.columns:
+            associated_mask = df['ev/id'].notna()
+            event_col = 'ev/id'
+        elif 'assoc_event_id' in df.columns:
+            associated_mask = df['assoc_event_id'].notna()
+            event_col = 'assoc_event_id'
+        elif 'assoc_cluster_id' in df.columns:
+            associated_mask = df['assoc_cluster_id'].notna()
+            event_col = 'assoc_cluster_id'
+        else:
+            raise ValueError("No event ID column found in association data (expected 'ev/id', 'assoc_event_id', or 'assoc_cluster_id')")
+
+        total_photons = len(df)
+        associated_count = associated_mask.sum()
+        unassociated_count = total_photons - associated_count
+
+        # Determine x/y column names (new format: px/x, px/y or ph/x, ph/y; old format: x, y)
+        x_col = y_col = None
+        for candidate_x, candidate_y in [('px/x', 'px/y'), ('ph/x', 'ph/y'), ('x', 'y')]:
+            if candidate_x in df.columns and candidate_y in df.columns:
+                x_col, y_col = candidate_x, candidate_y
+                break
+
+        # Inline mode: create combined figure
+        if inline:
+            if verbosity >= 2:
+                print("📊 Generating inline summary plot...")
+
+            # Create a 2x2 grid for the main plots
+            fig, axes = plt.subplots(2, 2, figsize=(14, 12))
+
+            # Plot 1: Association rate overview (top-left)
+            ax = axes[0, 0]
+            data = pd.DataFrame({
+                'Status': ['Associated', 'Unassociated'],
+                'Count': [associated_count, unassociated_count],
+                'Percentage': [100 * associated_count / total_photons, 100 * unassociated_count / total_photons]
+            })
+            sns.barplot(data=data, x='Status', y='Percentage', ax=ax, palette='Set2')
+            ax.set_ylabel('Percentage (%)')
+            ax.set_title(f'Association Rate: {100 * associated_count / total_photons:.1f}%', fontweight='bold')
+            for i, (count, pct) in enumerate(zip(data['Count'], data['Percentage'])):
+                ax.text(i, pct + 1, f'{pct:.1f}%\n({count})', ha='center', va='bottom', fontsize=9)
+
+            # Plot 2: Event size distribution (top-right)
+            ax = axes[0, 1]
+            if associated_count > 0:
+                event_sizes = df[associated_mask].groupby(event_col).size()
+                sns.histplot(event_sizes, bins=range(1, min(event_sizes.max() + 2, 50)), ax=ax,
+                            kde=False, edgecolor='black', color='mediumseagreen')
+                ax.axvline(event_sizes.median(), color='red', linestyle='--', linewidth=2,
+                          label=f'Median: {event_sizes.median():.1f}')
+                ax.axvline(event_sizes.mean(), color='blue', linestyle='--', linewidth=2,
+                          label=f'Mean: {event_sizes.mean():.1f}')
+                ax.set_xlabel('Photons per Event')
+                ax.set_ylabel('Number of Events')
+                ax.set_title('Event Size Distribution', fontweight='bold')
+                ax.legend(fontsize=8)
+            else:
+                ax.text(0.5, 0.5, 'No associated data', ha='center', va='center', transform=ax.transAxes)
+                ax.set_title('Event Size Distribution', fontweight='bold')
+
+            # Plot 3: Position scatter (bottom-left)
+            ax = axes[1, 0]
+            if x_col is not None and associated_count > 0:
+                unassoc_df = df[~associated_mask]
+                if len(unassoc_df) > 0:
+                    ax.scatter(unassoc_df[x_col], unassoc_df[y_col], alpha=0.3, s=5, c='gray', label='Unassociated')
+                assoc_df = df[associated_mask]
+                ax.scatter(assoc_df[x_col], assoc_df[y_col], alpha=0.5, s=5, c='blue', label='Associated')
+                ax.set_xlabel('X Position (pixels)')
+                ax.set_ylabel('Y Position (pixels)')
+                ax.set_title('Photon Positions', fontweight='bold')
+                ax.legend(fontsize=8)
+                ax.set_aspect('equal')
+            else:
+                ax.text(0.5, 0.5, 'No position data', ha='center', va='center', transform=ax.transAxes)
+                ax.set_title('Photon Positions', fontweight='bold')
+
+            # Plot 4: Density heatmap (bottom-right)
+            ax = axes[1, 1]
+            if x_col is not None and associated_count > 0:
+                assoc_df = df[associated_mask]
+                h = ax.hist2d(assoc_df[x_col], assoc_df[y_col], bins=50, cmap='hot')
+                plt.colorbar(h[3], ax=ax, label='Count')
+                ax.set_xlabel('X Position (pixels)')
+                ax.set_ylabel('Y Position (pixels)')
+                ax.set_title('Associated Photon Density', fontweight='bold')
+                ax.set_aspect('equal')
+            else:
+                ax.text(0.5, 0.5, 'No position data', ha='center', va='center', transform=ax.transAxes)
+                ax.set_title('Associated Photon Density', fontweight='bold')
+
+            plt.tight_layout()
+
+            if verbosity >= 1:
+                print(f"✅ Generated inline summary plot ({associated_count}/{total_photons} associated)")
+
+            return fig
+
+        # File mode: save individual plots
+        if output_dir is None:
+            output_dir = os.path.join(self.data_folder, "AssociatedResults")
+        os.makedirs(output_dir, exist_ok=True)
+        plot_files = []
+
         # Plot 1: Association rate overview
         if verbosity >= 1:
             print("📊 Generating association rate plot...")
-        
+
         fig, ax = plt.subplots(figsize=(10, 6))
-        
-        total_photons = len(df)
-        associated_mask = df['assoc_event_id'].notna() if 'assoc_event_id' in df.columns else df['assoc_cluster_id'].notna()
-        associated_count = associated_mask.sum()
-        unassociated_count = total_photons - associated_count
-        
+
         data = pd.DataFrame({
             'Status': ['Associated', 'Unassociated'],
             'Count': [associated_count, unassociated_count],
             'Percentage': [100 * associated_count / total_photons, 100 * unassociated_count / total_photons]
         })
-        
+
         sns.barplot(data=data, x='Status', y='Percentage', ax=ax, palette='Set2')
         ax.set_ylabel('Percentage (%)', fontsize=12)
         ax.set_title(f'Association Rate: {100 * associated_count / total_photons:.1f}%', fontsize=14, fontweight='bold')
-        
+
         # Add percentage labels on bars
         for i, (count, pct) in enumerate(zip(data['Count'], data['Percentage'])):
             ax.text(i, pct + 1, f'{pct:.1f}%\n({count} photons)', ha='center', va='bottom', fontsize=10)
-        
+
         plt.tight_layout()
         plot_path = os.path.join(output_dir, 'association_rate.png')
         plt.savefig(plot_path, dpi=150, bbox_inches='tight')
         plt.close()
         plot_files.append(plot_path)
-        
+
         # Plot 2: Spatial differences (photon-event)
         if 'spatial_diff_px' in df.columns and associated_count > 0:
             if verbosity >= 1:
                 print("📊 Generating spatial difference distribution...")
-            
+
             fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-            
+
             # Histogram
             spatial_diffs = df[associated_mask]['spatial_diff_px'].dropna()
             axes[0].hist(spatial_diffs, bins=50, edgecolor='black', alpha=0.7, color='steelblue')
@@ -4254,28 +4363,28 @@ For more information, see: https://github.com/nuclear/neutron_event_analyzer
             axes[0].set_title('Photon-Event Spatial Difference Distribution', fontsize=13, fontweight='bold')
             axes[0].legend()
             axes[0].grid(True, alpha=0.3)
-            
+
             # Box plot
             sns.boxplot(y=spatial_diffs, ax=axes[1], color='steelblue')
             axes[1].set_ylabel('Spatial Difference (pixels)', fontsize=12)
             axes[1].set_title('Spatial Difference Box Plot', fontsize=13, fontweight='bold')
             axes[1].grid(True, alpha=0.3)
-            
+
             plt.tight_layout()
             plot_path = os.path.join(output_dir, 'spatial_difference_distribution.png')
             plt.savefig(plot_path, dpi=150, bbox_inches='tight')
             plt.close()
             plot_files.append(plot_path)
-        
+
         # Plot 3: Time differences (photon-event)
         if 'time_diff_ns' in df.columns and associated_count > 0:
             if verbosity >= 1:
                 print("📊 Generating temporal difference distribution...")
-            
+
             fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-            
+
             time_diffs = df[associated_mask]['time_diff_ns'].dropna()
-            
+
             # Histogram
             axes[0].hist(time_diffs, bins=50, edgecolor='black', alpha=0.7, color='coral')
             axes[0].axvline(time_diffs.median(), color='red', linestyle='--', linewidth=2, label=f'Median: {time_diffs.median():.2f} ns')
@@ -4284,118 +4393,117 @@ For more information, see: https://github.com/nuclear/neutron_event_analyzer
             axes[0].set_title('Photon-Event Time Difference Distribution', fontsize=13, fontweight='bold')
             axes[0].legend()
             axes[0].grid(True, alpha=0.3)
-            
+
             # Box plot
             sns.boxplot(y=time_diffs, ax=axes[1], color='coral')
             axes[1].set_ylabel('Time Difference (nanoseconds)', fontsize=12)
             axes[1].set_title('Time Difference Box Plot', fontsize=13, fontweight='bold')
             axes[1].grid(True, alpha=0.3)
-            
+
             plt.tight_layout()
             plot_path = os.path.join(output_dir, 'time_difference_distribution.png')
             plt.savefig(plot_path, dpi=150, bbox_inches='tight')
             plt.close()
             plot_files.append(plot_path)
-        
+
         # Plot 4: Correlation plot (spatial vs temporal differences)
         if 'spatial_diff_px' in df.columns and 'time_diff_ns' in df.columns and associated_count > 0:
             if verbosity >= 1:
                 print("📊 Generating correlation plot...")
-            
+
             fig, ax = plt.subplots(figsize=(10, 8))
-            
+
             plot_df = df[associated_mask][['spatial_diff_px', 'time_diff_ns']].dropna()
-            
+
             # Hexbin for better visualization with many points
             hexbin = ax.hexbin(plot_df['time_diff_ns'], plot_df['spatial_diff_px'],
                               gridsize=50, cmap='YlOrRd', mincnt=1)
             plt.colorbar(hexbin, ax=ax, label='Count')
-            
+
             ax.set_xlabel('Time Difference (nanoseconds)', fontsize=12)
             ax.set_ylabel('Spatial Difference (pixels)', fontsize=12)
             ax.set_title('Spatial vs Temporal Difference Correlation', fontsize=14, fontweight='bold')
             ax.grid(True, alpha=0.3)
-            
+
             # Add correlation coefficient
             corr = plot_df.corr().iloc[0, 1]
             ax.text(0.05, 0.95, f'Correlation: {corr:.3f}', transform=ax.transAxes,
                    fontsize=12, verticalalignment='top',
                    bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-            
+
             plt.tight_layout()
             plot_path = os.path.join(output_dir, 'spatial_temporal_correlation.png')
             plt.savefig(plot_path, dpi=150, bbox_inches='tight')
             plt.close()
             plot_files.append(plot_path)
-        
+
         # Plot 5: Event size distribution
         if associated_count > 0:
             if verbosity >= 1:
                 print("📊 Generating event size distribution...")
-            
-            event_col = 'assoc_event_id' if 'assoc_event_id' in df.columns else 'assoc_cluster_id'
+
             event_sizes = df[associated_mask].groupby(event_col).size()
-            
+
             fig, ax = plt.subplots(figsize=(10, 6))
-            
-            sns.histplot(event_sizes, bins=range(1, event_sizes.max() + 2), ax=ax, 
+
+            sns.histplot(event_sizes, bins=range(1, event_sizes.max() + 2), ax=ax,
                         kde=False, edgecolor='black', color='mediumseagreen')
-            
+
             ax.axvline(event_sizes.median(), color='red', linestyle='--', linewidth=2,
                       label=f'Median: {event_sizes.median():.1f} photons/event')
             ax.axvline(event_sizes.mean(), color='blue', linestyle='--', linewidth=2,
                       label=f'Mean: {event_sizes.mean():.1f} photons/event')
-            
+
             ax.set_xlabel('Photons per Event', fontsize=12)
             ax.set_ylabel('Number of Events', fontsize=12)
             ax.set_title('Event Size Distribution', fontsize=14, fontweight='bold')
             ax.legend()
             ax.grid(True, alpha=0.3, axis='y')
-            
+
             plt.tight_layout()
             plot_path = os.path.join(output_dir, 'event_size_distribution.png')
             plt.savefig(plot_path, dpi=150, bbox_inches='tight')
             plt.close()
             plot_files.append(plot_path)
-        
+
         # Plot 6: X-Y position scatter (showing association quality)
-        if 'x' in df.columns and 'y' in df.columns and associated_count > 0:
+        if x_col is not None and associated_count > 0:
             if verbosity >= 1:
                 print("📊 Generating position scatter plot...")
-            
+
             fig, axes = plt.subplots(1, 2, figsize=(16, 7))
-            
+
             # Unassociated photons
             unassoc_df = df[~associated_mask]
             if len(unassoc_df) > 0:
-                axes[0].scatter(unassoc_df['x'], unassoc_df['y'], alpha=0.3, s=10, c='gray', label='Unassociated')
-            
+                axes[0].scatter(unassoc_df[x_col], unassoc_df[y_col], alpha=0.3, s=10, c='gray', label='Unassociated')
+
             # Associated photons
             assoc_df = df[associated_mask]
-            axes[0].scatter(assoc_df['x'], assoc_df['y'], alpha=0.5, s=10, c='blue', label='Associated')
-            
+            axes[0].scatter(assoc_df[x_col], assoc_df[y_col], alpha=0.5, s=10, c='blue', label='Associated')
+
             axes[0].set_xlabel('X Position (pixels)', fontsize=12)
             axes[0].set_ylabel('Y Position (pixels)', fontsize=12)
             axes[0].set_title('Photon Positions: Associated vs Unassociated', fontsize=13, fontweight='bold')
             axes[0].legend()
             axes[0].grid(True, alpha=0.3)
             axes[0].set_aspect('equal')
-            
+
             # Heatmap of associated photons
             if len(assoc_df) > 0:
-                h = axes[1].hist2d(assoc_df['x'], assoc_df['y'], bins=50, cmap='hot')
+                h = axes[1].hist2d(assoc_df[x_col], assoc_df[y_col], bins=50, cmap='hot')
                 plt.colorbar(h[3], ax=axes[1], label='Photon Count')
                 axes[1].set_xlabel('X Position (pixels)', fontsize=12)
                 axes[1].set_ylabel('Y Position (pixels)', fontsize=12)
                 axes[1].set_title('Associated Photon Density Heatmap', fontsize=13, fontweight='bold')
                 axes[1].set_aspect('equal')
-            
+
             plt.tight_layout()
             plot_path = os.path.join(output_dir, 'position_scatter.png')
             plt.savefig(plot_path, dpi=150, bbox_inches='tight')
             plt.close()
             plot_files.append(plot_path)
-        
+
         # Summary
         if verbosity >= 1:
             print(f"\n✅ Generated {len(plot_files)} plots:")
@@ -4405,314 +4513,270 @@ For more information, see: https://github.com/nuclear/neutron_event_analyzer
 
         return plot_files
 
-    def plot_violin(self, y=None, groupby='photons', hue=None, title=None, time_scale=1e7,
-                    output_dir=None, figsize=(10, 6), ylim=None, show=True, verbosity=None):
-        r"""
-        Generate violin plots of per-photon statistics.
+    def plot_violin(self, columns=None, split_pairs=True, hue='associated',
+                    output_dir=None, figsize=None, show=True, inline=False,
+                    sample_size=10000, verbosity=None):
+        """
+        Generate violin plots showing distributions of association data columns.
 
-        This method computes per-photon statistics (e.g., std of pixel properties) and creates
-        violin plots. Works with both single and grouped data:
-        - Single data: Shows distribution of multiple metrics side-by-side
-        - Grouped data: Compares same metric across different groups
+        Creates a grid of despined subplots, each showing the distribution of a column.
+        Similar columns (like x/y pairs) can be combined into split violin plots.
 
         Args:
-            y (str or list): Column(s) to plot. Options depend on groupby:
-
-                           For groupby='photons' (default):
-                           - 'px\x': std of pixel x-coordinates per photon
-                           - 'px\y': std of pixel y-coordinates per photon
-                           - 'px\tot': std of pixel time-over-threshold per photon
-                           - 'px\toa': std of pixel time-of-arrival per photon (scaled)
-                           - 'px\n': number of pixels per photon (count)
-
-                           For groupby='events':
-                           - 'ph\x': std of photon x-coordinates per event
-                           - 'ph\y': std of photon y-coordinates per event
-                           - 'ph\n': number of photons per event (count)
-                           - 'ph\toa': std of photon time-of-arrival per event (scaled)
-                           - 'ev\psd': event PSD value (mean)
-
-                           If None, plots all available metrics for chosen groupby.
-                           Can be a string for single metric or list for multiple.
-            groupby (str): What to group by. Options:
-                          - 'photons': Compute statistics per photon (default)
-                          - 'events': Compute statistics per event
-            hue (str, optional): For groupby folders, the hue variable for the violin plot.
-                               Typically the group name (e.g., 'detector_model').
-                               If None, uses 'group' as the hue variable.
-                               Ignored for single data.
-            title (str, optional): Plot title. If None, generates automatic title.
-            time_scale (float): Scale factor for time columns (default: 1e7 for ~100ns units).
-            output_dir (str, optional): Output directory for plots. If None, uses 'AssociatedResults' folder.
-            figsize (tuple): Figure size as (width, height). Default: (10, 6).
-            ylim (tuple, optional): Y-axis limits as (ymin, ymax). If None, auto-scales.
-            show (bool): Whether to display plots inline. Default: True.
-            verbosity (int, optional): Verbosity level. If None, uses instance verbosity.
+            columns (list, optional): Columns to plot. If None, auto-detects available columns.
+                                     Use column names like 'px/x', 'ph/cog', 'ev/psd', etc.
+            split_pairs (bool): If True, combines x/y and similar column pairs into split violins.
+                               Default: True.
+            hue (str): Variable to use for split violins. Options:
+                      - 'associated': Split by association status (associated vs unassociated)
+                      - 'coordinate': Split by coordinate type (x vs y) for paired columns
+                      - None: No splitting, single violin per column
+                      Default: 'associated'.
+            output_dir (str, optional): Output directory for saved plot. If None, uses 'AssociatedResults'.
+            figsize (tuple, optional): Figure size. If None, auto-calculated based on number of plots.
+            show (bool): Whether to display plot inline. Default: True.
+            inline (bool): If True, returns the figure without saving. Default: False.
+            sample_size (int): Max samples per violin to avoid slow rendering. Default: 10000.
+            verbosity (int, optional): Verbosity level (0=silent, 1=summary, 2=debug).
 
         Returns:
-            str or dict: For single folder, returns the plot file path.
-                        For groupby folders, returns dict with metric names as keys and plot paths as values.
-
-        Raises:
-            ValueError: If no association data is available or if unsupported groupby option.
+            If inline=True: matplotlib.figure.Figure
+            If inline=False: str path to saved plot file
 
         Example:
-            # Single data - compare per-photon metrics side-by-side
-            assoc = nea.Analyse("run112_ZnS/ZnS")
-            assoc.plot_violin(groupby='photons')  # Default
+            # Auto-detect and plot all available columns
+            assoc.plot_violin()
 
-            # Single data - compare per-event metrics
-            assoc.plot_violin(groupby='events')
+            # Plot specific columns
+            assoc.plot_violin(columns=['px/x', 'px/y', 'ph/cog', 'ev/psd'])
 
-            # Grouped analysis - compare photon stats across groups
-            assoc = nea.Analyse("archive/pencilbeam1/detector_model/")
-            assoc.plot_violin(y="px/toa", title="Pixel time spread per photon")
+            # Inline display without saving
+            fig = assoc.plot_violin(inline=True)
 
-            # Grouped analysis - compare event stats across groups
-            assoc.plot_violin(groupby='events', y="ph/n", title="Photons per event")
-
-            # Plot multiple metrics with custom limits
-            assoc.plot_violin(y=["px/x", "px/y", "px/tot"], ylim=(-1, 5))
+            # Split by coordinate (x vs y) instead of association status
+            assoc.plot_violin(hue='coordinate')
         """
         import matplotlib.pyplot as plt
         import seaborn as sns
-        import pandas as pd
+        import numpy as np
 
         # Use instance verbosity if not specified
         if verbosity is None:
             verbosity = self.verbosity if self.verbosity is not None else 1
 
-        if groupby not in ['photons', 'events']:
-            raise ValueError(f"groupby must be 'photons' or 'events', got '{groupby}'")
+        # Check data availability
+        if self.associated_df is None or len(self.associated_df) == 0:
+            raise ValueError("No association data available. Run associate() first.")
 
-        # Determine if we have grouped data or single data
-        is_grouped = self.is_groupby and bool(self.groupby_results)
+        df = self.associated_df
 
-        # Check if we have any data at all
-        if not is_grouped:
-            if self.associated_df is None or len(self.associated_df) == 0:
-                raise ValueError("No association data available. Run associate() first or load a folder with association results.")
+        # Column definitions: column_name -> (description, unit, pair_group)
+        # pair_group is used to combine similar columns (e.g., 'px_pos' for px/x and px/y)
+        column_info = {
+            # Pixel columns
+            'px/x': ('Pixel X position', 'pixels', 'px_pos'),
+            'px/y': ('Pixel Y position', 'pixels', 'px_pos'),
+            'px/toa': ('Pixel time-of-arrival', 's', None),
+            'px/tot': ('Pixel time-over-threshold', 'a.u.', None),
+            # Photon columns
+            'ph/x': ('Photon X position', 'pixels', 'ph_pos'),
+            'ph/y': ('Photon Y position', 'pixels', 'ph_pos'),
+            'ph/toa': ('Photon time-of-arrival', 's', None),
+            'ph/cog': ('Pixel-to-photon CoG distance', 'pixels', None),
+            # Event columns
+            'ev/x': ('Event X position', 'pixels', 'ev_pos'),
+            'ev/y': ('Event Y position', 'pixels', 'ev_pos'),
+            'ev/t': ('Event time', 's', None),
+            'ev/n': ('Event multiplicity', 'count', None),
+            'ev/psd': ('Event PSD', 'a.u.', None),
+            'ev/cog': ('Photon-to-event CoG distance', 'pixels', None),
+        }
 
-        # Define available metrics based on groupby
-        if groupby == 'photons':
-            available_metrics = {
-                'px/x': ('px/x', 'std', 'Pixel X std (px)'),
-                'px/y': ('px/y', 'std', 'Pixel Y std (px)'),
-                'px/tot': ('px/tot', 'std', 'Pixel ToT std (s)'),
-                'px/n': ('ph/id', 'count', 'Pixels per photon'),
-                'px/toa': ('px/toa', 'std', f'Pixel ToA std ({1e9/time_scale:.0f}ns)')
-            }
-            group_col = 'ph/id'
-        else:  # groupby == 'events'
-            available_metrics = {
-                'ph/x': ('ph/x', 'std', 'Photon X std (px)'),
-                'ph/y': ('ph/y', 'std', 'Photon Y std (px)'),
-                'ph/n': ('ev/id', 'count', 'Photons per event'),
-                'ph/toa': ('ph/toa', 'std', f'Photon ToA std ({1e9/time_scale:.0f}ns)'),
-                'ev/psd': ('ev/psd', 'mean', 'Event PSD')
-            }
-            group_col = 'ev/id'
-
-        # Handle y parameter
-        if y is None:
-            metrics_to_plot = list(available_metrics.keys())
-        elif isinstance(y, str):
-            metrics_to_plot = [y]
+        # Determine which columns to plot
+        if columns is None:
+            # Auto-detect available columns
+            available = [col for col in column_info.keys() if col in df.columns]
         else:
-            metrics_to_plot = list(y)
+            available = [col for col in columns if col in df.columns]
+            missing = [col for col in columns if col not in df.columns]
+            if missing and verbosity >= 1:
+                print(f"⚠️  Columns not found: {missing}")
 
-        # Validate metrics
-        for metric in metrics_to_plot:
-            if metric not in available_metrics:
-                raise ValueError(f"Unknown metric '{metric}'. Available: {list(available_metrics.keys())}")
+        if not available:
+            raise ValueError("No valid columns found to plot.")
 
-        # Set output directory
+        # Determine event ID column for association status
+        if 'ev/id' in df.columns:
+            event_col = 'ev/id'
+        elif 'assoc_event_id' in df.columns:
+            event_col = 'assoc_event_id'
+        elif 'assoc_cluster_id' in df.columns:
+            event_col = 'assoc_cluster_id'
+        else:
+            event_col = None
+            if hue == 'associated':
+                hue = None
+                if verbosity >= 1:
+                    print("⚠️  No event ID column found, disabling association split")
+
+        # Group columns for split violins if enabled
+        if split_pairs and hue == 'coordinate':
+            # Group by pair_group
+            plot_groups = {}
+            standalone = []
+            for col in available:
+                info = column_info.get(col, (col, '', None))
+                pair_group = info[2]
+                if pair_group:
+                    if pair_group not in plot_groups:
+                        plot_groups[pair_group] = []
+                    plot_groups[pair_group].append(col)
+                else:
+                    standalone.append(col)
+            # Convert to list of tuples (cols_to_plot, is_paired)
+            plots = [(cols, True) for cols in plot_groups.values() if len(cols) == 2]
+            plots += [([col], False) for col in standalone]
+            # Add unpaired from groups
+            for cols in plot_groups.values():
+                if len(cols) == 1:
+                    plots.append((cols, False))
+        else:
+            # Each column gets its own subplot
+            plots = [([col], False) for col in available]
+
+        n_plots = len(plots)
+        if n_plots == 0:
+            raise ValueError("No columns available to plot.")
+
+        # Calculate figure size
+        if figsize is None:
+            n_cols = min(3, n_plots)
+            n_rows = (n_plots + n_cols - 1) // n_cols
+            figsize = (4.5 * n_cols, 3.5 * n_rows)
+
+        n_cols_grid = min(3, n_plots)
+        n_rows_grid = (n_plots + n_cols_grid - 1) // n_cols_grid
+
+        if verbosity >= 1:
+            print(f"📊 Generating violin plots for {len(available)} columns...")
+
+        # Create figure and axes
+        fig, axes = plt.subplots(n_rows_grid, n_cols_grid, figsize=figsize, squeeze=False)
+        axes = axes.flatten()
+
+        # Hide unused axes
+        for idx in range(n_plots, len(axes)):
+            axes[idx].set_visible(False)
+
+        # Set seaborn style
+        sns.set_theme(style="white")
+
+        for idx, (cols, is_paired) in enumerate(plots):
+            ax = axes[idx]
+
+            if is_paired and hue == 'coordinate':
+                # Split violin for x/y pair - both halves in one violin
+                col_x, col_y = cols[0], cols[1]
+                info_x = column_info.get(col_x, (col_x, '', None))
+
+                # Sample data
+                data_x = df[col_x].dropna()
+                data_y = df[col_y].dropna()
+                if len(data_x) > sample_size:
+                    data_x = data_x.sample(sample_size, random_state=42)
+                if len(data_y) > sample_size:
+                    data_y = data_y.sample(sample_size, random_state=42)
+
+                # Combine for split violin - single x position, split by coordinate
+                base_name = col_x.rsplit('/', 1)[0]
+                plot_data = pd.DataFrame({
+                    'value': pd.concat([data_x, data_y], ignore_index=True),
+                    'coord': ['X'] * len(data_x) + ['Y'] * len(data_y),
+                    'group': [base_name] * (len(data_x) + len(data_y))
+                })
+
+                sns.violinplot(data=plot_data, x='group', y='value', hue='coord',
+                              split=True, inner='quart', ax=ax, palette=['#4C72B0', '#DD8452'],
+                              density_norm='width', cut=0, legend=True)
+
+                # Labels
+                ax.set_xlabel(f'{base_name}/x,y')
+                ax.set_ylabel(info_x[1])
+                ax.set_title(info_x[0].replace(' X ', ' '), fontsize=10, fontweight='bold')
+                ax.legend(title='', loc='upper right', fontsize=8)
+
+            else:
+                # Single column violin
+                col = cols[0]
+                info = column_info.get(col, (col, '', None))
+
+                data = df[col].dropna()
+                if len(data) > sample_size:
+                    data = data.sample(sample_size, random_state=42)
+
+                if hue == 'associated' and event_col is not None:
+                    # Get association status for sampled indices
+                    sampled_idx = data.index
+                    assoc_status = df.loc[sampled_idx, event_col].notna()
+                    plot_data = pd.DataFrame({
+                        'value': data.values,
+                        'status': ['Associated' if s else 'Unassociated' for s in assoc_status]
+                    })
+
+                    # Check if we have both categories
+                    n_assoc = (plot_data['status'] == 'Associated').sum()
+                    n_unassoc = (plot_data['status'] == 'Unassociated').sum()
+
+                    if n_assoc > 0 and n_unassoc > 0:
+                        sns.violinplot(data=plot_data, x='status', y='value', hue='status',
+                                      split=False, inner='quart', ax=ax,
+                                      palette={'Associated': '#55A868', 'Unassociated': '#C44E52'},
+                                      density_norm='width', cut=0, legend=False)
+                        ax.set_xlabel('')
+                    else:
+                        # Only one category, plot without split
+                        sns.violinplot(y=data, ax=ax, inner='quart',
+                                      color='#55A868' if n_assoc > 0 else '#C44E52',
+                                      density_norm='width', cut=0)
+                        ax.set_xlabel('Associated' if n_assoc > 0 else 'Unassociated')
+                else:
+                    # No hue splitting
+                    sns.violinplot(y=data, ax=ax, inner='quart', color='#4C72B0',
+                                  density_norm='width', cut=0)
+                    ax.set_xlabel('')
+
+                ax.set_ylabel(info[1])
+                ax.set_title(f'{col}\n({info[0]})', fontsize=10, fontweight='bold')
+
+            # Despine
+            sns.despine(ax=ax, left=False, bottom=True)
+            ax.tick_params(bottom=False)
+
+        plt.tight_layout()
+
+        if verbosity >= 1:
+            print(f"✅ Generated violin plot with {n_plots} subplots")
+
+        if inline:
+            return fig
+
+        # Save plot
         if output_dir is None:
             output_dir = os.path.join(self.data_folder, "AssociatedResults")
         os.makedirs(output_dir, exist_ok=True)
 
-        if verbosity >= 1:
-            print(f"\n📊 Generating violin plots for {len(metrics_to_plot)} metric(s)...")
+        plot_path = os.path.join(output_dir, 'violin_distributions.png')
+        plt.savefig(plot_path, dpi=150, bbox_inches='tight')
 
-        plot_files = {}
+        if show:
+            plt.show()
 
-        if is_grouped:
-            # GROUPED MODE: Plot each metric, comparing across groups
-            for metric in metrics_to_plot:
-                col, agg_func, ylabel = available_metrics[metric]
-
-                # Collect data from all groups
-                all_data = []
-                for group_name, group_df in self.groupby_results.items():
-                    if group_col not in group_df.columns:
-                        if verbosity >= 1:
-                            print(f"⚠️  Skipping {group_name}: no {group_col} column found")
-                        continue
-
-                    # Check if metric column is needed and exists
-                    if agg_func == 'count':
-                        # For count, we just need the group column
-                        pass
-                    elif col not in group_df.columns:
-                        if verbosity >= 1:
-                            print(f"⚠️  Skipping {group_name}: column {col} not found")
-                        continue
-
-                    # Compute statistics based on aggregation function
-                    if agg_func == 'std':
-                        if metric in ['px/toa', 'ph/toa']:
-                            stats = group_df.groupby(group_col)[col].std() * time_scale
-                        else:
-                            stats = group_df.groupby(group_col)[col].std()
-                    elif agg_func == 'count':
-                        stats = group_df.groupby(group_col)[col].count()
-                    elif agg_func == 'mean':
-                        stats = group_df.groupby(group_col)[col].mean()
-
-                    # Create dataframe with group label
-                    df_metric = pd.DataFrame({
-                        'value': stats.values,
-                        hue if hue else 'group': group_name
-                    })
-                    all_data.append(df_metric)
-
-                if not all_data:
-                    if verbosity >= 1:
-                        print(f"⚠️  No data available for metric {metric}")
-                    continue
-
-                # Combine all groups
-                combined_df = pd.concat(all_data, ignore_index=True)
-
-                # Create violin plot
-                plt.figure(figsize=figsize)
-                sns.violinplot(data=combined_df, y='value', x=hue if hue else 'group',
-                              split=False, inner="quart")
-
-                # Set labels and title
-                plt.ylabel(ylabel, fontsize=12)
-                plt.xlabel(hue if hue else 'Group', fontsize=12)
-                if title:
-                    plt.title(title, fontsize=13, fontweight='bold')
-                else:
-                    plt.title(f'{ylabel} - Comparison across groups', fontsize=13, fontweight='bold')
-
-                # Set y-axis limits if provided
-                if ylim is not None:
-                    plt.ylim(ylim)
-
-                # Rotate x-axis labels if needed
-                plt.xticks(rotation=45, ha='right')
-
-                plt.tight_layout()
-
-                # Save plot
-                plot_filename = f'violin_{metric.replace(chr(92), "_")}.png'
-                plot_path = os.path.join(output_dir, plot_filename)
-                plt.savefig(plot_path, dpi=150, bbox_inches='tight')
-
-                # Show plot inline if requested
-                if show:
-                    plt.show()
-
-                plt.close()
-
-                plot_files[metric] = plot_path
-
-                if verbosity >= 2:
-                    print(f"✅ Generated {plot_filename}")
-
-        else:
-            # SINGLE MODE: Plot all metrics side-by-side for one dataset
-            df = self.associated_df
-
-            # Check for required column
-            if group_col not in df.columns:
-                raise ValueError(f"No '{group_col}' column found in association data. Cannot compute {groupby} statistics.")
-
-            # Compute all metrics
-            all_metric_data = []
-            for metric in metrics_to_plot:
-                col, agg_func, ylabel = available_metrics[metric]
-
-                # Check if metric column is needed and exists
-                if agg_func == 'count':
-                    # For count, we just need the group column
-                    pass
-                elif col not in df.columns:
-                    if verbosity >= 1:
-                        print(f"⚠️  Skipping {metric}: column {col} not found")
-                    continue
-
-                # Compute statistics based on aggregation function
-                if agg_func == 'std':
-                    if metric in ['px/toa', 'ph/toa']:
-                        stats = df.groupby(group_col)[col].std() * time_scale
-                    else:
-                        stats = df.groupby(group_col)[col].std()
-                elif agg_func == 'count':
-                    stats = df.groupby(group_col)[col].count()
-                elif agg_func == 'mean':
-                    stats = df.groupby(group_col)[col].mean()
-
-                # Add to combined data
-                for value in stats.values:
-                    all_metric_data.append({
-                        'metric': ylabel,
-                        'value': value
-                    })
-
-            if not all_metric_data:
-                if verbosity >= 1:
-                    print(f"⚠️  No data available for any metrics")
-                return None
-
-            # Create dataframe for plotting
-            plot_df = pd.DataFrame(all_metric_data)
-
-            # Create single violin plot with all metrics
-            plt.figure(figsize=figsize)
-            sns.violinplot(data=plot_df, x='metric', y='value', split=False, inner="quart")
-
-            # Set labels and title
-            plt.ylabel('Value', fontsize=12)
-            plt.xlabel('Metric', fontsize=12)
-            if title:
-                plt.title(title, fontsize=13, fontweight='bold')
-            else:
-                default_title = f'Per-{groupby.capitalize()[:-1]} Statistics Distribution'
-                plt.title(default_title, fontsize=13, fontweight='bold')
-
-            # Set y-axis limits if provided
-            if ylim is not None:
-                plt.ylim(ylim)
-
-            # Rotate x-axis labels if needed
-            plt.xticks(rotation=45, ha='right')
-
-            plt.tight_layout()
-
-            # Save plot
-            plot_filename = 'violin_all_metrics.png'
-            plot_path = os.path.join(output_dir, plot_filename)
-            plt.savefig(plot_path, dpi=150, bbox_inches='tight')
-
-            # Show plot inline if requested
-            if show:
-                plt.show()
-
-            plt.close()
-
-            plot_files['all_metrics'] = plot_path
-
-            if verbosity >= 2:
-                print(f"✅ Generated {plot_filename}")
+        plt.close()
 
         if verbosity >= 1:
-            print(f"\n✅ Generated {len(plot_files)} violin plot(s)")
-            print(f"📁 Plots saved to: {output_dir}")
+            print(f"📁 Plot saved to: {plot_path}")
 
-        return plot_files if len(plot_files) > 1 else (list(plot_files.values())[0] if plot_files else None)
+        return plot_path
 
     def get_violin_stats(self, groupby='photons', time_scale=1e7):
         """
