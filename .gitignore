@@ -7,3 +7,6 @@ empir
 export
 src/neutron_event_analyzer/__pycache__
 tests/__pycache__
+archive
+tests/test_data/test_cog_calculation
+tests/test_data/test_*
