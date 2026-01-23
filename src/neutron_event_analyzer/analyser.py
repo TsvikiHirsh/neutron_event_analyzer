@@ -1051,23 +1051,38 @@ class Analyse:
                 - 'kdtree': Full KDTree-based association.
                 - 'window': Symmetric time-window KDTree.
                 - 'simple': Forward time-window with spatial closest selection and CoG check (fast for small windows).
+                - 'mystic': Constrained optimization using mystic framework (requires mystic package).
         """
         if self.pair_dfs is None:
             raise ValueError("Load data first using load().")
-        
+
         if method == 'auto':
             effective_method = 'lumacam' if self.use_lumacam else 'kdtree'
         else:
             effective_method = method
-        
+
         if effective_method == 'lumacam' and not LUMACAM_AVAILABLE:
             raise ImportError("lumacamTesting is required for 'lumacam' method.")
-        
+
         max_time_s = max_time_ns / 1e9 if max_time_ns is not None else None
-        
+
         self.assoc_method = effective_method
         event_col = 'assoc_cluster_id' if effective_method == 'lumacam' else 'assoc_event_id'
-        
+
+        # Special handling for mystic method - process all data together
+        if effective_method == 'mystic':
+            # Concatenate all photons and events from pairs
+            all_photons = pd.concat([pair[1] for pair in self.pair_dfs], ignore_index=True)
+            all_events = pd.concat([pair[0] for pair in self.pair_dfs], ignore_index=True)
+
+            self.associated_df = self._associate_photons_to_events_mystic(
+                all_photons, all_events,
+                max_dist_px=dSpace_px,
+                max_time_ns=max_time_ns,
+                verbosity=verbosity
+            )
+            return self.associated_df
+
         with ProcessPoolExecutor(max_workers=self.n_threads) as executor:
             futures = [
                 executor.submit(
@@ -1174,7 +1189,7 @@ class Analyse:
 
     def associate(self, pixel_max_dist_px=None, pixel_max_time_ns=None,
                   photon_time_norm_ns=1.0, photon_spatial_norm_px=1.0, photon_dSpace_px=None,
-                  max_time_ns=None, verbosity=None, method='simple', pixel_method='simple', relax=1.0):
+                  max_time_ns=None, verbosity=None, method='simple', relax=1.0):
         """
         Perform full three-tier association: pixels → photons → events.
 
@@ -1198,9 +1213,13 @@ class Analyse:
                                            If None, uses value from settings or defaults to 500.
             verbosity (int, optional): Verbosity level (0=silent, 1=progress bars only, 2=detailed output).
                                       If None, uses instance verbosity level set in __init__.
-            method (str): Association method for photon-event association ('simple', 'kdtree', 'window', 'lumacam').
-            pixel_method (str): Association method for pixel-photon association ('simple', 'kdtree'). Default is 'simple'.
-                               Both methods use the same center-of-mass matching logic.
+            method (str): Association method for both pixel-photon and photon-event stages.
+                         Options: 'simple', 'kdtree', 'mystic'.
+                         - 'simple': Fast forward time-window with spatial closest selection (default).
+                         - 'kdtree': KDTree-based association with iterative CoM refinement.
+                         - 'mystic': Constrained optimization using mystic framework (requires mystic package).
+                                    Formulates association as optimization problem minimizing CoG distance
+                                    subject to time constraints.
             relax (float): Scaling factor for association parameters. Default is 1.0 (no scaling).
                           Values > 1.0 relax the parameters (e.g., 1.5 = 50% more relaxed),
                           values < 1.0 make them more restrictive (e.g., 0.8 = 20% more restrictive).
@@ -1221,7 +1240,6 @@ class Analyse:
                 max_time_ns=max_time_ns,
                 verbosity=verbosity,
                 method=method,
-                pixel_method=pixel_method,
                 relax=relax
             )
 
@@ -1279,11 +1297,18 @@ class Analyse:
 
             # Step 1: Associate pixels to photons
             if verbosity >= 2:
-                print(f"\nStep 1/2: Associating pixels to photons (method={pixel_method})...")
+                print(f"\nStep 1/2: Associating pixels to photons (method={method})...")
 
             # Choose pixel-photon association method
-            if pixel_method == 'kdtree':
+            if method == 'kdtree':
                 pixels_associated = self._associate_pixels_to_photons_kdtree(
+                    self.pixels_df, self.photons_df,
+                    max_dist_px=pixel_max_dist_px,
+                    max_time_ns=pixel_max_time_ns,
+                    verbosity=verbosity
+                )
+            elif method == 'mystic':
+                pixels_associated = self._associate_pixels_to_photons_mystic(
                     self.pixels_df, self.photons_df,
                     max_dist_px=pixel_max_dist_px,
                     max_time_ns=pixel_max_time_ns,
@@ -1366,11 +1391,18 @@ class Analyse:
         # Case 2: Pixels → Photons only
         elif has_pixels and has_photons:
             if verbosity >= 2:
-                print(f"\nPerforming 2-tier association: Pixels → Photons (method={pixel_method})")
+                print(f"\nPerforming 2-tier association: Pixels → Photons (method={method})")
 
             # Choose pixel-photon association method
-            if pixel_method == 'kdtree':
+            if method == 'kdtree':
                 pixels_associated = self._associate_pixels_to_photons_kdtree(
+                    self.pixels_df, self.photons_df,
+                    max_dist_px=pixel_max_dist_px,
+                    max_time_ns=pixel_max_time_ns,
+                    verbosity=verbosity
+                )
+            elif method == 'mystic':
+                pixels_associated = self._associate_pixels_to_photons_mystic(
                     self.pixels_df, self.photons_df,
                     max_dist_px=pixel_max_dist_px,
                     max_time_ns=pixel_max_time_ns,
@@ -3478,6 +3510,467 @@ class Analyse:
                       f"max={pixels_per_photon.max()}")
 
         return pixels
+
+    def _associate_pixels_to_photons_mystic(self, pixels_df, photons_df, max_dist_px=5.0, max_time_ns=500,
+                                            time_weight=1.0, cog_weight=1.0, min_pixels=1, verbosity=0):
+        """
+        Associate pixels to photons using mystic optimization framework.
+
+        This method formulates the pixel-to-photon association as a constrained optimization problem.
+        For each photon, it finds the optimal subset of nearby pixels by minimizing:
+          - The distance between pixel cluster center-of-gravity and photon position
+          - A penalty for time mismatch (first pixel time should match photon time)
+
+        Args:
+            pixels_df (pd.DataFrame): Pixel DataFrame with 'x', 'y', 't', 'tot' columns.
+            photons_df (pd.DataFrame): Photon DataFrame with 'x', 'y', 't' columns.
+            max_dist_px (float): Maximum spatial distance in pixels for candidate selection.
+            max_time_ns (float): Maximum time difference in nanoseconds for candidate selection.
+            time_weight (float): Weight for time mismatch penalty in objective function.
+            cog_weight (float): Weight for center-of-gravity mismatch in objective function.
+            min_pixels (int): Minimum number of pixels required to form a valid cluster.
+            verbosity (int): Verbosity level (0=silent, 1=summary, 2=debug).
+
+        Returns:
+            pd.DataFrame: Pixel DataFrame with added association columns.
+        """
+        try:
+            from mystic.solvers import fmin_powell, diffev2
+            from mystic.monitors import VerboseMonitor
+        except ImportError:
+            raise ImportError("mystic package is required for this method. Install with: pip install mystic")
+
+        if pixels_df is None or photons_df is None or len(pixels_df) == 0 or len(photons_df) == 0:
+            if verbosity >= 1:
+                print("Warning: Empty pixels or photons dataframe, skipping pixel-photon association")
+            return pixels_df
+
+        pixels = pixels_df.copy()
+        photons = photons_df.copy()
+
+        # Initialize association columns
+        pixels['assoc_photon_id'] = np.nan
+        pixels['assoc_phot_x'] = np.nan
+        pixels['assoc_phot_y'] = np.nan
+        pixels['assoc_phot_t'] = np.nan
+        pixels['pixel_com_dist'] = np.nan
+
+        # Sort by time
+        pixels = pixels.sort_values('t').reset_index(drop=True)
+        photons = photons.sort_values('t').reset_index(drop=True)
+        photons['photon_id'] = photons.index + 1
+
+        # Build kdtree for pixel spatial coordinates
+        pixel_coords = np.column_stack([pixels['x'].to_numpy(), pixels['y'].to_numpy()])
+        pixel_tree = cKDTree(pixel_coords)
+
+        max_time_s = max_time_ns / 1e9
+
+        # Track optimization statistics
+        opt_stats = {'success': 0, 'fallback': 0, 'failed': 0}
+        com_quality_stats = {'exact': 0, 'good': 0, 'acceptable': 0, 'poor': 0, 'failed': 0}
+
+        for _, phot in tqdm(photons.iterrows(), total=len(photons),
+                           desc="Associating pixels to photons (mystic)", disable=(verbosity == 0)):
+            phot_t, phot_x, phot_y, phot_id = phot['t'], phot['x'], phot['y'], phot['photon_id']
+
+            # Use kdtree to find all pixels within spatial radius
+            candidate_indices = pixel_tree.query_ball_point([phot_x, phot_y], max_dist_px)
+
+            if len(candidate_indices) == 0:
+                continue
+
+            # Filter by time window: [phot_t, phot_t + max_time_s]
+            candidate_pixels = pixels.iloc[candidate_indices]
+            time_mask = (candidate_pixels['t'] >= phot_t) & (candidate_pixels['t'] <= phot_t + max_time_s)
+
+            if not time_mask.any():
+                continue
+
+            # Get pixels in time and spatial window
+            valid_pixels = candidate_pixels[time_mask]
+            valid_indices = np.array(candidate_indices)[time_mask.to_numpy()]
+
+            # Filter out already assigned pixels
+            unassigned_mask = valid_pixels['assoc_photon_id'].isna().to_numpy()
+            if not unassigned_mask.any():
+                continue
+
+            # Get unassigned pixels
+            unassigned_idx = valid_indices[unassigned_mask]
+            unassigned_pixels = valid_pixels[unassigned_mask]
+            unassigned_x = unassigned_pixels['x'].to_numpy()
+            unassigned_y = unassigned_pixels['y'].to_numpy()
+            unassigned_t = unassigned_pixels['t'].to_numpy()
+
+            n_candidates = len(unassigned_idx)
+
+            # For very small candidate sets, use simple assignment
+            if n_candidates <= min_pixels:
+                # Assign all candidates
+                for i, pix_idx in enumerate(unassigned_idx):
+                    pixels.loc[pix_idx, 'assoc_photon_id'] = phot_id
+                    pixels.loc[pix_idx, 'assoc_phot_x'] = phot_x
+                    pixels.loc[pix_idx, 'assoc_phot_y'] = phot_y
+                    pixels.loc[pix_idx, 'assoc_phot_t'] = phot_t
+                com_x, com_y = unassigned_x.mean(), unassigned_y.mean()
+                com_dist = np.sqrt((com_x - phot_x)**2 + (com_y - phot_y)**2)
+                for pix_idx in unassigned_idx:
+                    pixels.loc[pix_idx, 'pixel_com_dist'] = com_dist
+                opt_stats['fallback'] += 1
+                continue
+
+            # Define objective function for mystic
+            # Decision variables: weights w[i] in [0, 1] for each candidate pixel
+            # Objective: minimize CoG distance + time penalty
+            def objective(weights):
+                weights = np.array(weights)
+                w_sum = weights.sum()
+
+                if w_sum < 0.1:  # Avoid division by zero
+                    return 1e10
+
+                # Weighted center of gravity
+                cog_x = (weights * unassigned_x).sum() / w_sum
+                cog_y = (weights * unassigned_y).sum() / w_sum
+
+                # CoG distance from photon position
+                cog_dist = np.sqrt((cog_x - phot_x)**2 + (cog_y - phot_y)**2)
+
+                # Time penalty: first pixel (by weight) should have time close to photon time
+                # Approximate "first pixel" as weighted minimum time
+                # Use softmin: weighted average with exponential emphasis on early times
+                time_diffs = (unassigned_t - phot_t) * 1e9  # Convert to ns
+                # Penalize if weighted average time is far from photon time
+                weighted_time = (weights * time_diffs).sum() / w_sum
+                time_penalty = abs(weighted_time)  # Should be close to 0
+
+                # Total objective
+                obj = cog_weight * cog_dist**2 + time_weight * (time_penalty / max_time_ns)**2
+
+                return obj
+
+            # Constraint: enforce minimum total weight (at least min_pixels worth)
+            def constraint(weights):
+                weights = np.array(weights)
+                # Ensure sum of weights is at least min_pixels
+                w_sum = weights.sum()
+                if w_sum < min_pixels:
+                    # Scale up weights proportionally
+                    scale = min_pixels / max(w_sum, 0.01)
+                    weights = np.clip(weights * scale, 0, 1)
+                return weights
+
+            # Initial guess: all weights = 0.5
+            x0 = np.full(n_candidates, 0.5)
+
+            # Bounds: weights in [0, 1]
+            lb = np.zeros(n_candidates)
+            ub = np.ones(n_candidates)
+
+            try:
+                # Use Powell's method for optimization (fast for small problems)
+                if n_candidates <= 20:
+                    solution = fmin_powell(objective, x0, bounds=list(zip(lb, ub)),
+                                          constraints=constraint, disp=False, gtol=1e-4)
+                else:
+                    # For larger problems, use differential evolution
+                    solution = diffev2(objective, list(zip(lb, ub)), constraints=constraint,
+                                       npop=min(20, n_candidates * 2), disp=False, gtol=50)
+
+                optimal_weights = np.array(solution)
+
+                # Threshold weights to get binary assignment
+                threshold = 0.3
+                assigned_mask = optimal_weights >= threshold
+
+                if assigned_mask.sum() < min_pixels:
+                    # Fall back to top-k by weight
+                    top_k = min(min_pixels, n_candidates)
+                    top_indices = np.argsort(optimal_weights)[-top_k:]
+                    assigned_mask = np.zeros(n_candidates, dtype=bool)
+                    assigned_mask[top_indices] = True
+
+                opt_stats['success'] += 1
+
+            except Exception as e:
+                if verbosity >= 2:
+                    print(f"Optimization failed for photon {phot_id}: {e}, using fallback")
+                # Fallback: assign all candidates
+                assigned_mask = np.ones(n_candidates, dtype=bool)
+                opt_stats['failed'] += 1
+
+            # Compute final CoM
+            final_idx = unassigned_idx[assigned_mask]
+            final_x = unassigned_x[assigned_mask]
+            final_y = unassigned_y[assigned_mask]
+
+            if len(final_idx) > 0:
+                com_x = final_x.mean()
+                com_y = final_y.mean()
+                com_dist = np.sqrt((com_x - phot_x)**2 + (com_y - phot_y)**2)
+
+                # Track quality
+                if com_dist <= 0.1:
+                    com_quality_stats['exact'] += 1
+                elif com_dist <= max_dist_px * 0.3:
+                    com_quality_stats['good'] += 1
+                elif com_dist <= max_dist_px * 0.5:
+                    com_quality_stats['acceptable'] += 1
+                elif com_dist <= max_dist_px:
+                    com_quality_stats['poor'] += 1
+                else:
+                    com_quality_stats['failed'] += 1
+
+                # Assign pixels
+                for pix_idx in final_idx:
+                    pixels.loc[pix_idx, 'assoc_photon_id'] = phot_id
+                    pixels.loc[pix_idx, 'assoc_phot_x'] = phot_x
+                    pixels.loc[pix_idx, 'assoc_phot_y'] = phot_y
+                    pixels.loc[pix_idx, 'assoc_phot_t'] = phot_t
+                    pixels.loc[pix_idx, 'pixel_com_dist'] = com_dist
+
+        # Store statistics
+        matched_pixels = pixels['assoc_photon_id'].notna().sum()
+        total_pixels = len(pixels)
+        matched_photon_ids = pixels[pixels['assoc_photon_id'].notna()]['assoc_photon_id'].unique()
+        matched_photons = len(matched_photon_ids)
+        total_photons = len(photons)
+
+        self.last_assoc_stats = {
+            'matched_pixels': matched_pixels,
+            'total_pixels': total_pixels,
+            'matched_photons': matched_photons,
+            'total_photons': total_photons,
+            'com_quality': com_quality_stats.copy(),
+            'optimization': opt_stats.copy()
+        }
+
+        if verbosity >= 1:
+            print(f"✅ Pixel-Photon Association (mystic optimization):")
+            print(f"   Pixels:  {matched_pixels:,} / {total_pixels:,} matched ({100 * matched_pixels / total_pixels:.1f}%)")
+            print(f"   Photons: {matched_photons:,} / {total_photons:,} matched ({100 * matched_photons / total_photons:.1f}%)")
+            print(f"   Optimization: {opt_stats['success']} success, {opt_stats['fallback']} fallback, {opt_stats['failed']} failed")
+
+        if verbosity >= 2:
+            total_processed = sum(com_quality_stats.values())
+            if total_processed > 0:
+                print(f"   Center-of-Mass Match Quality:")
+                print(f"      Exact (≤0.1px):     {com_quality_stats['exact']:,} ({100 * com_quality_stats['exact'] / total_processed:.1f}%)")
+                print(f"      Good (≤30% radius): {com_quality_stats['good']:,} ({100 * com_quality_stats['good'] / total_processed:.1f}%)")
+                print(f"      Acceptable (≤50%):  {com_quality_stats['acceptable']:,} ({100 * com_quality_stats['acceptable'] / total_processed:.1f}%)")
+                print(f"      Poor (≤100%):       {com_quality_stats['poor']:,} ({100 * com_quality_stats['poor'] / total_processed:.1f}%)")
+
+        return pixels
+
+    def _associate_photons_to_events_mystic(self, photons_df, events_df, max_dist_px=10.0, max_time_ns=500,
+                                            time_weight=1.0, cog_weight=1.0, min_photons=1, verbosity=0):
+        """
+        Associate photons to events using mystic optimization framework.
+
+        This method formulates the photon-to-event association as a constrained optimization problem.
+        For each event, it finds the optimal subset of nearby photons by minimizing:
+          - The distance between photon cluster center-of-gravity and event position
+          - A penalty for time mismatch (first photon time should match event time)
+
+        Args:
+            photons_df (pd.DataFrame): Photon DataFrame with 'x', 'y', 't' columns.
+            events_df (pd.DataFrame): Event DataFrame with 'x', 'y', 't', 'n', 'PSD' columns.
+            max_dist_px (float): Maximum spatial distance in pixels for candidate selection.
+            max_time_ns (float): Maximum time difference in nanoseconds for candidate selection.
+            time_weight (float): Weight for time mismatch penalty in objective function.
+            cog_weight (float): Weight for center-of-gravity mismatch in objective function.
+            min_photons (int): Minimum number of photons required to form a valid cluster.
+            verbosity (int): Verbosity level (0=silent, 1=summary, 2=debug).
+
+        Returns:
+            pd.DataFrame: Photon DataFrame with added association columns.
+        """
+        try:
+            from mystic.solvers import fmin_powell, diffev2
+        except ImportError:
+            raise ImportError("mystic package is required for this method. Install with: pip install mystic")
+
+        if photons_df is None or events_df is None or len(photons_df) == 0 or len(events_df) == 0:
+            if verbosity >= 1:
+                print("Warning: Empty photons or events dataframe, skipping photon-event association")
+            return photons_df
+
+        photons = photons_df.copy()
+        events = events_df.copy()
+
+        # Initialize association columns
+        photons['assoc_event_id'] = np.nan
+        photons['assoc_x'] = np.nan
+        photons['assoc_y'] = np.nan
+        photons['assoc_t'] = np.nan
+        photons['assoc_n'] = np.nan
+        photons['assoc_PSD'] = np.nan
+        photons['assoc_com_dist'] = np.nan
+
+        # Sort by time
+        photons = photons.sort_values('t').reset_index(drop=True)
+        events = events.sort_values('t').reset_index(drop=True)
+        events['event_id'] = events.index + 1
+
+        # Build kdtree for photon spatial coordinates
+        photon_coords = np.column_stack([photons['x'].to_numpy(), photons['y'].to_numpy()])
+        photon_tree = cKDTree(photon_coords)
+
+        max_time_s = max_time_ns / 1e9
+
+        # Track optimization statistics
+        opt_stats = {'success': 0, 'fallback': 0, 'failed': 0}
+        com_quality_stats = {'exact': 0, 'good': 0, 'acceptable': 0, 'poor': 0, 'failed': 0}
+
+        for _, ev in tqdm(events.iterrows(), total=len(events),
+                         desc="Associating photons to events (mystic)", disable=(verbosity == 0)):
+            ev_t, ev_x, ev_y = ev['t'], ev['x'], ev['y']
+            ev_n, ev_psd, ev_id = ev['n'], ev['PSD'], ev['event_id']
+
+            # Use kdtree to find all photons within spatial radius
+            candidate_indices = photon_tree.query_ball_point([ev_x, ev_y], max_dist_px)
+
+            if len(candidate_indices) == 0:
+                continue
+
+            # Filter by time window
+            candidate_photons = photons.iloc[candidate_indices]
+            time_mask = (candidate_photons['t'] >= ev_t) & (candidate_photons['t'] <= ev_t + max_time_s)
+
+            if not time_mask.any():
+                continue
+
+            valid_photons = candidate_photons[time_mask]
+            valid_indices = np.array(candidate_indices)[time_mask.to_numpy()]
+
+            # Filter out already assigned photons
+            unassigned_mask = valid_photons['assoc_event_id'].isna().to_numpy()
+            if not unassigned_mask.any():
+                continue
+
+            unassigned_idx = valid_indices[unassigned_mask]
+            unassigned_photons = valid_photons[unassigned_mask]
+            unassigned_x = unassigned_photons['x'].to_numpy()
+            unassigned_y = unassigned_photons['y'].to_numpy()
+            unassigned_t = unassigned_photons['t'].to_numpy()
+
+            n_candidates = len(unassigned_idx)
+
+            if n_candidates <= min_photons:
+                # Assign all candidates
+                for phot_idx in unassigned_idx:
+                    photons.loc[phot_idx, 'assoc_event_id'] = ev_id
+                    photons.loc[phot_idx, 'assoc_x'] = ev_x
+                    photons.loc[phot_idx, 'assoc_y'] = ev_y
+                    photons.loc[phot_idx, 'assoc_t'] = ev_t
+                    photons.loc[phot_idx, 'assoc_n'] = ev_n
+                    photons.loc[phot_idx, 'assoc_PSD'] = ev_psd
+                com_x, com_y = unassigned_x.mean(), unassigned_y.mean()
+                com_dist = np.sqrt((com_x - ev_x)**2 + (com_y - ev_y)**2)
+                for phot_idx in unassigned_idx:
+                    photons.loc[phot_idx, 'assoc_com_dist'] = com_dist
+                opt_stats['fallback'] += 1
+                continue
+
+            # Define objective function
+            def objective(weights):
+                weights = np.array(weights)
+                w_sum = weights.sum()
+
+                if w_sum < 0.1:
+                    return 1e10
+
+                cog_x = (weights * unassigned_x).sum() / w_sum
+                cog_y = (weights * unassigned_y).sum() / w_sum
+                cog_dist = np.sqrt((cog_x - ev_x)**2 + (cog_y - ev_y)**2)
+
+                time_diffs = (unassigned_t - ev_t) * 1e9
+                weighted_time = (weights * time_diffs).sum() / w_sum
+                time_penalty = abs(weighted_time)
+
+                return cog_weight * cog_dist**2 + time_weight * (time_penalty / max_time_ns)**2
+
+            def constraint(weights):
+                weights = np.array(weights)
+                w_sum = weights.sum()
+                if w_sum < min_photons:
+                    scale = min_photons / max(w_sum, 0.01)
+                    weights = np.clip(weights * scale, 0, 1)
+                return weights
+
+            x0 = np.full(n_candidates, 0.5)
+            lb = np.zeros(n_candidates)
+            ub = np.ones(n_candidates)
+
+            try:
+                if n_candidates <= 20:
+                    solution = fmin_powell(objective, x0, bounds=list(zip(lb, ub)),
+                                          constraints=constraint, disp=False, gtol=1e-4)
+                else:
+                    solution = diffev2(objective, list(zip(lb, ub)), constraints=constraint,
+                                       npop=min(20, n_candidates * 2), disp=False, gtol=50)
+
+                optimal_weights = np.array(solution)
+                threshold = 0.3
+                assigned_mask = optimal_weights >= threshold
+
+                if assigned_mask.sum() < min_photons:
+                    top_k = min(min_photons, n_candidates)
+                    top_indices = np.argsort(optimal_weights)[-top_k:]
+                    assigned_mask = np.zeros(n_candidates, dtype=bool)
+                    assigned_mask[top_indices] = True
+
+                opt_stats['success'] += 1
+
+            except Exception as e:
+                if verbosity >= 2:
+                    print(f"Optimization failed for event {ev_id}: {e}, using fallback")
+                assigned_mask = np.ones(n_candidates, dtype=bool)
+                opt_stats['failed'] += 1
+
+            final_idx = unassigned_idx[assigned_mask]
+            final_x = unassigned_x[assigned_mask]
+            final_y = unassigned_y[assigned_mask]
+
+            if len(final_idx) > 0:
+                com_x = final_x.mean()
+                com_y = final_y.mean()
+                com_dist = np.sqrt((com_x - ev_x)**2 + (com_y - ev_y)**2)
+
+                if com_dist <= 0.1:
+                    com_quality_stats['exact'] += 1
+                elif com_dist <= max_dist_px * 0.3:
+                    com_quality_stats['good'] += 1
+                elif com_dist <= max_dist_px * 0.5:
+                    com_quality_stats['acceptable'] += 1
+                elif com_dist <= max_dist_px:
+                    com_quality_stats['poor'] += 1
+                else:
+                    com_quality_stats['failed'] += 1
+
+                for phot_idx in final_idx:
+                    photons.loc[phot_idx, 'assoc_event_id'] = ev_id
+                    photons.loc[phot_idx, 'assoc_x'] = ev_x
+                    photons.loc[phot_idx, 'assoc_y'] = ev_y
+                    photons.loc[phot_idx, 'assoc_t'] = ev_t
+                    photons.loc[phot_idx, 'assoc_n'] = ev_n
+                    photons.loc[phot_idx, 'assoc_PSD'] = ev_psd
+                    photons.loc[phot_idx, 'assoc_com_dist'] = com_dist
+
+        matched_photons = photons['assoc_event_id'].notna().sum()
+        total_photons = len(photons)
+        matched_event_ids = photons[photons['assoc_event_id'].notna()]['assoc_event_id'].unique()
+        matched_events = len(matched_event_ids)
+        total_events = len(events)
+
+        if verbosity >= 1:
+            print(f"✅ Photon-Event Association (mystic optimization):")
+            print(f"   Photons: {matched_photons:,} / {total_photons:,} matched ({100 * matched_photons / total_photons:.1f}%)")
+            print(f"   Events:  {matched_events:,} / {total_events:,} matched ({100 * matched_events / total_events:.1f}%)")
+            print(f"   Optimization: {opt_stats['success']} success, {opt_stats['fallback']} fallback, {opt_stats['failed']} failed")
+
+        return photons
 
     def _standardize_column_names(self, df, verbosity=0):
         """
