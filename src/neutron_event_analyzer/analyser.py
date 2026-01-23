@@ -3152,6 +3152,7 @@ class Analyse:
         pix_t = pixels['t'].to_numpy()
         pix_x = pixels['x'].to_numpy()
         pix_y = pixels['y'].to_numpy()
+        pix_tot = pixels['tot'].to_numpy() if 'tot' in pixels.columns else np.ones(len(pixels))
 
         max_time_s = max_time_ns / 1e9
         left = 0
@@ -3181,8 +3182,9 @@ class Analyse:
             sub_x = pix_x[sub_idx]
             sub_y = pix_y[sub_idx]
             sub_t = pix_t[sub_idx]
+            sub_tot = pix_tot[sub_idx]
 
-            # Calculate spatial distances
+            # Calculate spatial distances (Euclidean)
             spatial_diffs = np.sqrt((sub_x - phot_x)**2 + (sub_y - phot_y)**2)
 
             # Filter by max distance
@@ -3196,6 +3198,7 @@ class Analyse:
             valid_time_diffs = (sub_t[valid_mask] - phot_t) * 1e9
             valid_x = sub_x[valid_mask]
             valid_y = sub_y[valid_mask]
+            valid_tot = sub_tot[valid_mask]
 
             # Filter out already assigned pixels
             unassigned_mask = np.array([np.isnan(pixels.loc[idx, 'assoc_photon_id']) for idx in valid_sub_idx])
@@ -3206,6 +3209,7 @@ class Analyse:
             unassigned_idx = valid_sub_idx[unassigned_mask]
             unassigned_x = valid_x[unassigned_mask]
             unassigned_y = valid_y[unassigned_mask]
+            unassigned_tot = valid_tot[unassigned_mask]
             unassigned_spatial_diffs = valid_spatial_diffs[unassigned_mask]
             unassigned_time_diffs = valid_time_diffs[unassigned_mask]
 
@@ -3214,11 +3218,15 @@ class Analyse:
             best_subset_mask = np.ones(len(unassigned_idx), dtype=bool)
 
             for iteration in range(10):  # Max 10 iterations
-                # Compute center of mass of current subset
-                com_x = unassigned_x[best_subset_mask].mean()
-                com_y = unassigned_y[best_subset_mask].mean()
+                # Compute ToT-weighted center of mass of current subset
+                subset_tot = unassigned_tot[best_subset_mask]
+                tot_sum = subset_tot.sum()
+                if tot_sum == 0:
+                    tot_sum = 1  # Avoid division by zero
+                com_x = (unassigned_x[best_subset_mask] * subset_tot).sum() / tot_sum
+                com_y = (unassigned_y[best_subset_mask] * subset_tot).sum() / tot_sum
 
-                # Distance from photon to center of mass
+                # Distance from photon to center of mass (Euclidean)
                 com_dist = np.sqrt((com_x - phot_x)**2 + (com_y - phot_y)**2)
 
                 # If CoM is close enough, we're done
@@ -3226,11 +3234,10 @@ class Analyse:
                     break
 
                 # Otherwise, remove pixels that are pulling CoM away from photon
-                # Calculate how much each pixel pulls the CoM
                 subset_x = unassigned_x[best_subset_mask]
                 subset_y = unassigned_y[best_subset_mask]
 
-                # Distance of each pixel from photon
+                # Distance of each pixel from photon (Euclidean)
                 pixel_dists_from_photon = np.sqrt((subset_x - phot_x)**2 + (subset_y - phot_y)**2)
 
                 # Remove the pixel farthest from the photon
@@ -3242,10 +3249,14 @@ class Analyse:
                 mask_indices = np.where(best_subset_mask)[0]
                 best_subset_mask[mask_indices[worst_pixel_local_idx]] = False
 
-            # Compute final CoM and track quality
+            # Compute final ToT-weighted CoM and track quality
             if best_subset_mask.any():
-                final_com_x = unassigned_x[best_subset_mask].mean()
-                final_com_y = unassigned_y[best_subset_mask].mean()
+                final_tot = unassigned_tot[best_subset_mask]
+                final_tot_sum = final_tot.sum()
+                if final_tot_sum == 0:
+                    final_tot_sum = 1
+                final_com_x = (unassigned_x[best_subset_mask] * final_tot).sum() / final_tot_sum
+                final_com_y = (unassigned_y[best_subset_mask] * final_tot).sum() / final_tot_sum
                 final_com_dist = np.sqrt((final_com_x - phot_x)**2 + (final_com_y - phot_y)**2)
 
                 # Categorize CoM quality
@@ -3400,8 +3411,9 @@ class Analyse:
             unassigned_x = unassigned_pixels['x'].to_numpy()
             unassigned_y = unassigned_pixels['y'].to_numpy()
             unassigned_t = unassigned_pixels['t'].to_numpy()
+            unassigned_tot = unassigned_pixels['tot'].to_numpy() if 'tot' in unassigned_pixels.columns else np.ones(len(unassigned_pixels))
 
-            # Calculate spatial and time differences
+            # Calculate spatial and time differences (Euclidean distance)
             unassigned_spatial_diffs = np.sqrt((unassigned_x - phot_x)**2 + (unassigned_y - phot_y)**2)
             unassigned_time_diffs = (unassigned_t - phot_t) * 1e9
 
@@ -3410,11 +3422,15 @@ class Analyse:
             best_subset_mask = np.ones(len(unassigned_idx), dtype=bool)
 
             for iteration in range(10):  # Max 10 iterations
-                # Compute center of mass of current subset
-                com_x = unassigned_x[best_subset_mask].mean()
-                com_y = unassigned_y[best_subset_mask].mean()
+                # Compute ToT-weighted center of mass of current subset
+                subset_tot = unassigned_tot[best_subset_mask]
+                tot_sum = subset_tot.sum()
+                if tot_sum == 0:
+                    tot_sum = 1  # Avoid division by zero
+                com_x = (unassigned_x[best_subset_mask] * subset_tot).sum() / tot_sum
+                com_y = (unassigned_y[best_subset_mask] * subset_tot).sum() / tot_sum
 
-                # Distance from photon to center of mass
+                # Distance from photon to center of mass (Euclidean)
                 com_dist = np.sqrt((com_x - phot_x)**2 + (com_y - phot_y)**2)
 
                 # If CoM is close enough, we're done
@@ -3425,7 +3441,7 @@ class Analyse:
                 subset_x = unassigned_x[best_subset_mask]
                 subset_y = unassigned_y[best_subset_mask]
 
-                # Distance of each pixel from photon
+                # Distance of each pixel from photon (Euclidean)
                 pixel_dists_from_photon = np.sqrt((subset_x - phot_x)**2 + (subset_y - phot_y)**2)
 
                 # Remove the pixel farthest from the photon
@@ -3437,10 +3453,14 @@ class Analyse:
                 mask_indices = np.where(best_subset_mask)[0]
                 best_subset_mask[mask_indices[worst_pixel_local_idx]] = False
 
-            # Compute final CoM and track quality
+            # Compute final ToT-weighted CoM and track quality
             if best_subset_mask.any():
-                final_com_x = unassigned_x[best_subset_mask].mean()
-                final_com_y = unassigned_y[best_subset_mask].mean()
+                final_tot = unassigned_tot[best_subset_mask]
+                final_tot_sum = final_tot.sum()
+                if final_tot_sum == 0:
+                    final_tot_sum = 1
+                final_com_x = (unassigned_x[best_subset_mask] * final_tot).sum() / final_tot_sum
+                final_com_y = (unassigned_y[best_subset_mask] * final_tot).sum() / final_tot_sum
                 final_com_dist = np.sqrt((final_com_x - phot_x)**2 + (final_com_y - phot_y)**2)
 
                 # Categorize CoM quality
@@ -3602,10 +3622,11 @@ class Analyse:
             unassigned_x = unassigned_pixels['x'].to_numpy()
             unassigned_y = unassigned_pixels['y'].to_numpy()
             unassigned_t = unassigned_pixels['t'].to_numpy()
+            unassigned_tot = unassigned_pixels['tot'].to_numpy() if 'tot' in unassigned_pixels.columns else np.ones(len(unassigned_pixels))
 
             n_candidates = len(unassigned_idx)
 
-            # For very small candidate sets, use simple assignment
+            # For very small candidate sets, use simple assignment with ToT-weighted CoG
             if n_candidates <= min_pixels:
                 # Assign all candidates
                 for i, pix_idx in enumerate(unassigned_idx):
@@ -3613,7 +3634,12 @@ class Analyse:
                     pixels.loc[pix_idx, 'assoc_phot_x'] = phot_x
                     pixels.loc[pix_idx, 'assoc_phot_y'] = phot_y
                     pixels.loc[pix_idx, 'assoc_phot_t'] = phot_t
-                com_x, com_y = unassigned_x.mean(), unassigned_y.mean()
+                # ToT-weighted CoG
+                tot_sum = unassigned_tot.sum()
+                if tot_sum == 0:
+                    tot_sum = 1
+                com_x = (unassigned_x * unassigned_tot).sum() / tot_sum
+                com_y = (unassigned_y * unassigned_tot).sum() / tot_sum
                 com_dist = np.sqrt((com_x - phot_x)**2 + (com_y - phot_y)**2)
                 for pix_idx in unassigned_idx:
                     pixels.loc[pix_idx, 'pixel_com_dist'] = com_dist
@@ -3622,7 +3648,7 @@ class Analyse:
 
             # Define objective function for mystic
             # Decision variables: weights w[i] in [0, 1] for each candidate pixel
-            # Objective: minimize CoG distance + time penalty
+            # Objective: minimize ToT-weighted CoG distance + time penalty
             def objective(weights):
                 weights = np.array(weights)
                 w_sum = weights.sum()
@@ -3630,16 +3656,21 @@ class Analyse:
                 if w_sum < 0.1:  # Avoid division by zero
                     return 1e10
 
-                # Weighted center of gravity
-                cog_x = (weights * unassigned_x).sum() / w_sum
-                cog_y = (weights * unassigned_y).sum() / w_sum
+                # ToT-weighted center of gravity (weights select pixels, ToT weights the CoG)
+                # Effective weight = selection_weight * ToT
+                effective_weights = weights * unassigned_tot
+                ew_sum = effective_weights.sum()
+                if ew_sum < 0.01:
+                    return 1e10
 
-                # CoG distance from photon position
+                cog_x = (effective_weights * unassigned_x).sum() / ew_sum
+                cog_y = (effective_weights * unassigned_y).sum() / ew_sum
+
+                # CoG distance from photon position (Euclidean)
                 cog_dist = np.sqrt((cog_x - phot_x)**2 + (cog_y - phot_y)**2)
 
                 # Time penalty: first pixel (by weight) should have time close to photon time
                 # Approximate "first pixel" as weighted minimum time
-                # Use softmin: weighted average with exponential emphasis on early times
                 time_diffs = (unassigned_t - phot_t) * 1e9  # Convert to ns
                 # Penalize if weighted average time is far from photon time
                 weighted_time = (weights * time_diffs).sum() / w_sum
@@ -3700,14 +3731,19 @@ class Analyse:
                 assigned_mask = np.ones(n_candidates, dtype=bool)
                 opt_stats['failed'] += 1
 
-            # Compute final CoM
+            # Compute final ToT-weighted CoM
             final_idx = unassigned_idx[assigned_mask]
             final_x = unassigned_x[assigned_mask]
             final_y = unassigned_y[assigned_mask]
+            final_tot = unassigned_tot[assigned_mask]
 
             if len(final_idx) > 0:
-                com_x = final_x.mean()
-                com_y = final_y.mean()
+                # ToT-weighted CoG
+                final_tot_sum = final_tot.sum()
+                if final_tot_sum == 0:
+                    final_tot_sum = 1
+                com_x = (final_x * final_tot).sum() / final_tot_sum
+                com_y = (final_y * final_tot).sum() / final_tot_sum
                 com_dist = np.sqrt((com_x - phot_x)**2 + (com_y - phot_y)**2)
 
                 # Track quality
