@@ -1014,6 +1014,11 @@ class Analyse:
                 result = self._associate_photons_to_events_window(pdf, edf, time_norm_ns, spatial_norm_px, dSpace_px, max_time_s, verbosity)
             elif method == 'simple':
                 result = self._associate_photons_to_events_simple_window(pdf, edf, dSpace_px, max_time_s, verbosity)
+            elif method == 'mystic':
+                result = self._associate_photons_to_events_mystic(pdf, edf, dSpace_px, max_time_s * 1e9, verbosity=verbosity)
+            elif method == 'ml':
+                # ML photon-event not fully implemented, fall back to simple
+                result = self._associate_photons_to_events_simple_window(pdf, edf, dSpace_px, max_time_s, verbosity)
             else:
                 raise ValueError(f"Unknown association method: {method}")
             # Log number of matched photons
@@ -1214,11 +1219,13 @@ class Analyse:
             verbosity (int, optional): Verbosity level (0=silent, 1=progress bars only, 2=detailed output).
                                       If None, uses instance verbosity level set in __init__.
             method (str): Association method for both pixel-photon and photon-event stages.
-                         Options: 'simple', 'kdtree', 'mystic'.
+                         Options: 'simple', 'kdtree', 'mystic', 'ml'.
                          - 'simple': Fast forward time-window with spatial closest selection (default).
                          - 'kdtree': KDTree-based association with iterative CoM refinement.
                          - 'mystic': Constrained optimization using mystic framework (requires mystic package).
-                                    Formulates association as optimization problem minimizing CoG distance
+                                    Formulates association as optimization problem minimizing CoG distance.
+                         - 'ml': Machine learning-based association. Requires training first with
+                                train_association_model(). Falls back to 'simple' if no model available
                                     subject to time constraints.
             relax (float): Scaling factor for association parameters. Default is 1.0 (no scaling).
                           Values > 1.0 relax the parameters (e.g., 1.5 = 50% more relaxed),
@@ -1314,6 +1321,13 @@ class Analyse:
                     max_time_ns=pixel_max_time_ns,
                     verbosity=verbosity
                 )
+            elif method == 'ml':
+                pixels_associated = self._associate_pixels_to_photons_ml(
+                    self.pixels_df, self.photons_df,
+                    max_dist_px=pixel_max_dist_px,
+                    max_time_ns=pixel_max_time_ns,
+                    verbosity=verbosity
+                )
             else:  # default to 'simple'
                 pixels_associated = self._associate_pixels_to_photons_simple(
                     self.pixels_df, self.photons_df,
@@ -1403,6 +1417,13 @@ class Analyse:
                 )
             elif method == 'mystic':
                 pixels_associated = self._associate_pixels_to_photons_mystic(
+                    self.pixels_df, self.photons_df,
+                    max_dist_px=pixel_max_dist_px,
+                    max_time_ns=pixel_max_time_ns,
+                    verbosity=verbosity
+                )
+            elif method == 'ml':
+                pixels_associated = self._associate_pixels_to_photons_ml(
                     self.pixels_df, self.photons_df,
                     max_dist_px=pixel_max_dist_px,
                     max_time_ns=pixel_max_time_ns,
@@ -4007,6 +4028,601 @@ class Analyse:
             print(f"   Optimization: {opt_stats['success']} success, {opt_stats['fallback']} fallback, {opt_stats['failed']} failed")
 
         return photons
+
+    def _associate_pixels_to_photons_ml(self, pixels_df, photons_df, max_dist_px=5.0, max_time_ns=500,
+                                        model=None, model_path=None, verbosity=0):
+        """
+        Associate pixels to photons using a trained ML model.
+
+        This method uses a neural network trained on constrained associations (from mystic or
+        known-good associations) to predict pixel-to-photon assignments. The model learns the
+        relationship between pixel features (position, time, ToT) and photon features to predict
+        which pixels belong to each photon.
+
+        If no model is provided, falls back to the simple method.
+
+        Args:
+            pixels_df (pd.DataFrame): Pixel DataFrame with 'x', 'y', 't', 'tot' columns.
+            photons_df (pd.DataFrame): Photon DataFrame with 'x', 'y', 't' columns.
+            max_dist_px (float): Maximum spatial distance in pixels for candidate selection.
+            max_time_ns (float): Maximum time difference in nanoseconds for candidate selection.
+            model: Pre-trained ML model (sklearn or torch). If None, uses model_path.
+            model_path (str): Path to saved model file. If None and model is None, falls back to simple.
+            verbosity (int): Verbosity level (0=silent, 1=summary, 2=debug).
+
+        Returns:
+            pd.DataFrame: Pixel DataFrame with added association columns.
+        """
+        # Try to load model if not provided
+        if model is None and model_path is not None:
+            try:
+                import joblib
+                model = joblib.load(model_path)
+                if verbosity >= 1:
+                    print(f"Loaded ML model from {model_path}")
+            except Exception as e:
+                if verbosity >= 1:
+                    print(f"Failed to load model from {model_path}: {e}, falling back to simple method")
+                return self._associate_pixels_to_photons_simple(pixels_df, photons_df, max_dist_px, max_time_ns, verbosity)
+
+        # Check for stored model on instance
+        if model is None and hasattr(self, '_ml_association_model') and self._ml_association_model is not None:
+            model = self._ml_association_model
+
+        # If still no model, fall back to simple method
+        if model is None:
+            if verbosity >= 1:
+                print("No ML model available, falling back to simple method. "
+                      "Train a model first with train_association_model()")
+            return self._associate_pixels_to_photons_simple(pixels_df, photons_df, max_dist_px, max_time_ns, verbosity)
+
+        if pixels_df is None or photons_df is None or len(pixels_df) == 0 or len(photons_df) == 0:
+            if verbosity >= 1:
+                print("Warning: Empty pixels or photons dataframe, skipping pixel-photon association")
+            return pixels_df
+
+        pixels = pixels_df.copy()
+        photons = photons_df.copy()
+
+        # Initialize association columns
+        pixels['assoc_photon_id'] = np.nan
+        pixels['assoc_phot_x'] = np.nan
+        pixels['assoc_phot_y'] = np.nan
+        pixels['assoc_phot_t'] = np.nan
+        pixels['pixel_com_dist'] = np.nan
+        pixels['ml_confidence'] = np.nan  # ML prediction confidence
+
+        # Sort by time
+        pixels = pixels.sort_values('t').reset_index(drop=True)
+        photons = photons.sort_values('t').reset_index(drop=True)
+        photons['photon_id'] = photons.index + 1
+
+        # Build kdtree for spatial queries
+        pixel_coords = np.column_stack([pixels['x'].to_numpy(), pixels['y'].to_numpy()])
+        pixel_tree = cKDTree(pixel_coords)
+
+        max_time_s = max_time_ns / 1e9
+
+        # Track statistics
+        com_quality_stats = {'exact': 0, 'good': 0, 'acceptable': 0, 'poor': 0, 'failed': 0}
+        n_predictions = 0
+
+        for _, phot in tqdm(photons.iterrows(), total=len(photons),
+                           desc="Associating pixels to photons (ML)", disable=(verbosity == 0)):
+            phot_t, phot_x, phot_y, phot_id = phot['t'], phot['x'], phot['y'], phot['photon_id']
+
+            # Use kdtree to find candidate pixels
+            candidate_indices = pixel_tree.query_ball_point([phot_x, phot_y], max_dist_px)
+            if len(candidate_indices) == 0:
+                continue
+
+            # Filter by time window
+            candidate_pixels = pixels.iloc[candidate_indices]
+            time_mask = (candidate_pixels['t'] >= phot_t) & (candidate_pixels['t'] <= phot_t + max_time_s)
+            if not time_mask.any():
+                continue
+
+            valid_pixels = candidate_pixels[time_mask]
+            valid_indices = np.array(candidate_indices)[time_mask.to_numpy()]
+
+            # Filter out already assigned pixels
+            unassigned_mask = valid_pixels['assoc_photon_id'].isna().to_numpy()
+            if not unassigned_mask.any():
+                continue
+
+            unassigned_idx = valid_indices[unassigned_mask]
+            unassigned_pixels = valid_pixels[unassigned_mask]
+
+            # Extract features for ML prediction
+            features = self._extract_ml_features(unassigned_pixels, phot_x, phot_y, phot_t, max_dist_px, max_time_ns)
+
+            # Predict association probabilities
+            try:
+                if hasattr(model, 'predict_proba'):
+                    # sklearn classifier
+                    proba = model.predict_proba(features)
+                    # Handle single-class case (only positive or only negative in training)
+                    if proba.shape[1] == 1:
+                        probs = proba[:, 0] if model.classes_[0] == 1 else 1 - proba[:, 0]
+                    else:
+                        probs = proba[:, 1]
+                elif hasattr(model, 'forward'):
+                    # PyTorch model
+                    import torch
+                    model.eval()
+                    with torch.no_grad():
+                        features_tensor = torch.FloatTensor(features)
+                        probs = torch.sigmoid(model(features_tensor)).numpy().flatten()
+                else:
+                    # Fallback: use model output directly
+                    probs = model.predict(features)
+                    probs = np.clip(probs, 0, 1)
+
+                n_predictions += len(probs)
+            except Exception as e:
+                if verbosity >= 2:
+                    print(f"ML prediction failed for photon {phot_id}: {e}")
+                continue
+
+            # Threshold predictions
+            threshold = 0.5
+            assigned_mask = probs >= threshold
+
+            if not assigned_mask.any():
+                continue
+
+            # Get assigned pixels
+            final_idx = unassigned_idx[assigned_mask]
+            final_probs = probs[assigned_mask]
+            final_x = unassigned_pixels['x'].to_numpy()[assigned_mask]
+            final_y = unassigned_pixels['y'].to_numpy()[assigned_mask]
+            final_tot = unassigned_pixels['tot'].to_numpy()[assigned_mask] if 'tot' in unassigned_pixels.columns else np.ones(len(final_idx))
+
+            # Compute ToT-weighted CoG
+            tot_sum = final_tot.sum()
+            if tot_sum == 0:
+                tot_sum = 1
+            com_x = (final_x * final_tot).sum() / tot_sum
+            com_y = (final_y * final_tot).sum() / tot_sum
+            com_dist = np.sqrt((com_x - phot_x)**2 + (com_y - phot_y)**2)
+
+            # Track quality
+            if com_dist <= 0.1:
+                com_quality_stats['exact'] += 1
+            elif com_dist <= max_dist_px * 0.3:
+                com_quality_stats['good'] += 1
+            elif com_dist <= max_dist_px * 0.5:
+                com_quality_stats['acceptable'] += 1
+            elif com_dist <= max_dist_px:
+                com_quality_stats['poor'] += 1
+            else:
+                com_quality_stats['failed'] += 1
+
+            # Assign pixels
+            for i, pix_idx in enumerate(final_idx):
+                pixels.loc[pix_idx, 'assoc_photon_id'] = phot_id
+                pixels.loc[pix_idx, 'assoc_phot_x'] = phot_x
+                pixels.loc[pix_idx, 'assoc_phot_y'] = phot_y
+                pixels.loc[pix_idx, 'assoc_phot_t'] = phot_t
+                pixels.loc[pix_idx, 'pixel_com_dist'] = com_dist
+                pixels.loc[pix_idx, 'ml_confidence'] = final_probs[i]
+
+        # Store statistics
+        matched_pixels = pixels['assoc_photon_id'].notna().sum()
+        total_pixels = len(pixels)
+        matched_photon_ids = pixels[pixels['assoc_photon_id'].notna()]['assoc_photon_id'].unique()
+        matched_photons = len(matched_photon_ids)
+        total_photons = len(photons)
+
+        self.last_assoc_stats = {
+            'matched_pixels': matched_pixels,
+            'total_pixels': total_pixels,
+            'matched_photons': matched_photons,
+            'total_photons': total_photons,
+            'com_quality': com_quality_stats.copy(),
+            'n_predictions': n_predictions
+        }
+
+        if verbosity >= 1:
+            print(f"✅ Pixel-Photon Association (ML):")
+            print(f"   Pixels:  {matched_pixels:,} / {total_pixels:,} matched ({100 * matched_pixels / total_pixels:.1f}%)")
+            print(f"   Photons: {matched_photons:,} / {total_photons:,} matched ({100 * matched_photons / total_photons:.1f}%)")
+            print(f"   ML predictions made: {n_predictions:,}")
+
+        if verbosity >= 2:
+            total_processed = sum(com_quality_stats.values())
+            if total_processed > 0:
+                print(f"   Center-of-Mass Match Quality:")
+                print(f"      Exact (≤0.1px):     {com_quality_stats['exact']:,} ({100 * com_quality_stats['exact'] / total_processed:.1f}%)")
+                print(f"      Good (≤30% radius): {com_quality_stats['good']:,} ({100 * com_quality_stats['good'] / total_processed:.1f}%)")
+
+        return pixels
+
+    def _extract_ml_features(self, pixels_subset, phot_x, phot_y, phot_t, max_dist_px, max_time_ns):
+        """
+        Extract features for ML-based association prediction.
+
+        Features for each pixel relative to a photon:
+        - Normalized spatial distance (Euclidean)
+        - Normalized x offset
+        - Normalized y offset
+        - Normalized time offset
+        - Normalized ToT
+        - Distance from cluster centroid
+        - ToT relative to cluster mean
+
+        Args:
+            pixels_subset (pd.DataFrame): Candidate pixels
+            phot_x, phot_y, phot_t: Photon position and time
+            max_dist_px: Maximum distance for normalization
+            max_time_ns: Maximum time for normalization
+
+        Returns:
+            np.ndarray: Feature matrix (n_pixels, n_features)
+        """
+        n_pixels = len(pixels_subset)
+        if n_pixels == 0:
+            return np.array([]).reshape(0, 10)
+
+        pix_x = pixels_subset['x'].to_numpy()
+        pix_y = pixels_subset['y'].to_numpy()
+        pix_t = pixels_subset['t'].to_numpy()
+        pix_tot = pixels_subset['tot'].to_numpy() if 'tot' in pixels_subset.columns else np.ones(n_pixels)
+
+        # Spatial features
+        dx = pix_x - phot_x
+        dy = pix_y - phot_y
+        dist = np.sqrt(dx**2 + dy**2)
+
+        # Time features
+        dt_ns = (pix_t - phot_t) * 1e9
+
+        # Cluster features
+        centroid_x = pix_x.mean()
+        centroid_y = pix_y.mean()
+        dist_to_centroid = np.sqrt((pix_x - centroid_x)**2 + (pix_y - centroid_y)**2)
+        tot_mean = pix_tot.mean() if pix_tot.mean() > 0 else 1
+
+        # Build feature matrix
+        features = np.column_stack([
+            dist / max_dist_px,                          # Normalized distance to photon
+            dx / max_dist_px,                            # Normalized x offset
+            dy / max_dist_px,                            # Normalized y offset
+            dt_ns / max_time_ns,                         # Normalized time offset
+            pix_tot / (pix_tot.max() if pix_tot.max() > 0 else 1),  # Normalized ToT
+            dist_to_centroid / max_dist_px,              # Distance from cluster centroid
+            pix_tot / tot_mean,                          # ToT relative to mean
+            np.full(n_pixels, n_pixels / 10),            # Cluster size feature
+            np.arange(n_pixels) / max(n_pixels - 1, 1),  # Pixel order in cluster
+            np.abs(dt_ns) / max_time_ns                  # Absolute time offset
+        ])
+
+        return features
+
+    def train_association_model(self, training_data=None, method='simple', model_type='rf',
+                                max_dist_px=5.0, max_time_ns=500, n_samples=10000,
+                                save_path=None, verbosity=1):
+        """
+        Train an ML model for pixel-to-photon association using constrained associations.
+
+        This method generates training data by running the specified association method
+        (simple, kdtree, or mystic) and uses the resulting associations to train a classifier
+        that predicts whether a pixel belongs to a photon based on spatial-temporal features.
+
+        Args:
+            training_data (pd.DataFrame, optional): Pre-computed training data with 'label' column.
+                If None, generates training data from current pixels/photons using the specified method.
+            method (str): Association method to use for generating training labels ('simple', 'kdtree', 'mystic').
+            model_type (str): Type of ML model to train:
+                - 'rf': Random Forest (sklearn)
+                - 'gb': Gradient Boosting (sklearn)
+                - 'mlp': Neural Network (sklearn MLPClassifier)
+                - 'torch': PyTorch neural network
+            max_dist_px (float): Maximum spatial distance for candidate selection.
+            max_time_ns (float): Maximum time window in nanoseconds.
+            n_samples (int): Maximum number of training samples to use.
+            save_path (str, optional): Path to save the trained model.
+            verbosity (int): Verbosity level.
+
+        Returns:
+            model: Trained ML model
+
+        Example:
+            assoc = nea.Analyse("archive/data")
+            assoc.train_association_model(method='mystic', model_type='rf')
+            assoc.associate(method='ml')  # Uses the trained model
+        """
+        if training_data is None:
+            # Generate training data from current data
+            if self.pixels_df is None or self.photons_df is None:
+                raise ValueError("No pixels/photons data loaded. Load data first or provide training_data.")
+
+            if verbosity >= 1:
+                print(f"Generating training data using '{method}' method...")
+
+            # Run constrained association to get labels
+            if method == 'mystic':
+                labeled_pixels = self._associate_pixels_to_photons_mystic(
+                    self.pixels_df.copy(), self.photons_df.copy(),
+                    max_dist_px, max_time_ns, verbosity=max(0, verbosity - 1)
+                )
+            elif method == 'kdtree':
+                labeled_pixels = self._associate_pixels_to_photons_kdtree(
+                    self.pixels_df.copy(), self.photons_df.copy(),
+                    max_dist_px, max_time_ns, verbosity=max(0, verbosity - 1)
+                )
+            else:
+                labeled_pixels = self._associate_pixels_to_photons_simple(
+                    self.pixels_df.copy(), self.photons_df.copy(),
+                    max_dist_px, max_time_ns, verbosity=max(0, verbosity - 1)
+                )
+
+            training_data = self._generate_training_data(
+                labeled_pixels, self.photons_df, max_dist_px, max_time_ns, n_samples, verbosity
+            )
+
+        if len(training_data) == 0:
+            raise ValueError("No training data generated. Check your data and parameters.")
+
+        # Split features and labels
+        X = training_data.drop(columns=['label']).values
+        y = training_data['label'].values
+
+        if verbosity >= 1:
+            print(f"Training {model_type} model on {len(X):,} samples...")
+            print(f"   Positive samples: {y.sum():,} ({100 * y.mean():.1f}%)")
+            print(f"   Negative samples: {(1 - y).sum():,} ({100 * (1 - y.mean()):.1f}%)")
+
+        # Train model based on type
+        if model_type == 'rf':
+            from sklearn.ensemble import RandomForestClassifier
+            model = RandomForestClassifier(n_estimators=100, max_depth=10, n_jobs=-1, random_state=42)
+            model.fit(X, y)
+
+        elif model_type == 'gb':
+            from sklearn.ensemble import GradientBoostingClassifier
+            model = GradientBoostingClassifier(n_estimators=100, max_depth=5, random_state=42)
+            model.fit(X, y)
+
+        elif model_type == 'mlp':
+            from sklearn.neural_network import MLPClassifier
+            from sklearn.preprocessing import StandardScaler
+            # Normalize features for MLP
+            scaler = StandardScaler()
+            X_scaled = scaler.fit_transform(X)
+            model = MLPClassifier(hidden_layer_sizes=(64, 32), max_iter=500, random_state=42)
+            model.fit(X_scaled, y)
+            # Store scaler with model
+            model._scaler = scaler
+
+        elif model_type == 'torch':
+            model = self._train_torch_model(X, y, verbosity)
+
+        else:
+            raise ValueError(f"Unknown model_type: {model_type}. Use 'rf', 'gb', 'mlp', or 'torch'.")
+
+        # Store model on instance
+        self._ml_association_model = model
+
+        # Evaluate on training data
+        if verbosity >= 1:
+            if hasattr(model, 'predict_proba'):
+                from sklearn.metrics import accuracy_score, f1_score
+                y_pred = model.predict(X if model_type != 'mlp' else model._scaler.transform(X))
+                acc = accuracy_score(y, y_pred)
+                f1 = f1_score(y, y_pred)
+                print(f"   Training accuracy: {100 * acc:.1f}%")
+                print(f"   Training F1 score: {f1:.3f}")
+
+        # Save model if path provided
+        if save_path:
+            import joblib
+            joblib.dump(model, save_path)
+            if verbosity >= 1:
+                print(f"   Model saved to: {save_path}")
+
+        return model
+
+    def _generate_training_data(self, labeled_pixels, photons_df, max_dist_px, max_time_ns, n_samples, verbosity):
+        """
+        Generate training data from labeled pixel-photon associations.
+
+        Creates positive samples (pixels correctly associated with photons) and
+        negative samples (pixels from different photons or unassociated).
+
+        Args:
+            labeled_pixels: Pixel DataFrame with 'assoc_photon_id' column
+            photons_df: Photon DataFrame
+            max_dist_px, max_time_ns: Association parameters
+            n_samples: Maximum samples to generate
+            verbosity: Verbosity level
+
+        Returns:
+            pd.DataFrame: Training data with features and 'label' column
+        """
+        # Build kdtree for spatial queries
+        pixel_coords = np.column_stack([labeled_pixels['x'].to_numpy(), labeled_pixels['y'].to_numpy()])
+        pixel_tree = cKDTree(pixel_coords)
+
+        photons = photons_df.copy()
+        photons = photons.sort_values('t').reset_index(drop=True)
+        photons['photon_id'] = photons.index + 1
+
+        max_time_s = max_time_ns / 1e9
+
+        all_features = []
+        all_labels = []
+
+        samples_per_photon = max(1, n_samples // len(photons))
+
+        for _, phot in tqdm(photons.iterrows(), total=len(photons),
+                           desc="Generating training data", disable=(verbosity == 0)):
+            phot_t, phot_x, phot_y, phot_id = phot['t'], phot['x'], phot['y'], phot['photon_id']
+
+            # Find candidate pixels
+            candidate_indices = pixel_tree.query_ball_point([phot_x, phot_y], max_dist_px)
+            if len(candidate_indices) == 0:
+                continue
+
+            candidate_pixels = labeled_pixels.iloc[candidate_indices]
+            time_mask = (candidate_pixels['t'] >= phot_t) & (candidate_pixels['t'] <= phot_t + max_time_s)
+            if not time_mask.any():
+                continue
+
+            valid_pixels = candidate_pixels[time_mask]
+
+            # Extract features
+            features = self._extract_ml_features(valid_pixels, phot_x, phot_y, phot_t, max_dist_px, max_time_ns)
+
+            # Get labels: 1 if pixel was associated with THIS photon, 0 otherwise
+            labels = (valid_pixels['assoc_photon_id'] == phot_id).astype(int).values
+
+            # Subsample if too many
+            if len(features) > samples_per_photon:
+                # Keep balanced positive/negative samples
+                pos_mask = labels == 1
+                neg_mask = labels == 0
+                n_pos = min(pos_mask.sum(), samples_per_photon // 2)
+                n_neg = min(neg_mask.sum(), samples_per_photon // 2)
+
+                if n_pos > 0:
+                    pos_idx = np.random.choice(np.where(pos_mask)[0], n_pos, replace=False)
+                else:
+                    pos_idx = np.array([], dtype=int)
+                if n_neg > 0:
+                    neg_idx = np.random.choice(np.where(neg_mask)[0], n_neg, replace=False)
+                else:
+                    neg_idx = np.array([], dtype=int)
+
+                sample_idx = np.concatenate([pos_idx, neg_idx])
+                features = features[sample_idx]
+                labels = labels[sample_idx]
+
+            all_features.append(features)
+            all_labels.append(labels)
+
+            if len(all_features) * samples_per_photon >= n_samples:
+                break
+
+        if len(all_features) == 0:
+            return pd.DataFrame()
+
+        # Concatenate all data
+        X = np.vstack(all_features)
+        y = np.concatenate(all_labels)
+
+        # Create DataFrame
+        feature_names = ['dist_norm', 'dx_norm', 'dy_norm', 'dt_norm', 'tot_norm',
+                        'dist_centroid', 'tot_rel', 'cluster_size', 'pixel_order', 'abs_dt']
+        df = pd.DataFrame(X, columns=feature_names)
+        df['label'] = y
+
+        return df
+
+    def _train_torch_model(self, X, y, verbosity):
+        """
+        Train a PyTorch neural network for association prediction.
+
+        Args:
+            X: Feature matrix
+            y: Labels
+            verbosity: Verbosity level
+
+        Returns:
+            torch.nn.Module: Trained model
+        """
+        try:
+            import torch
+            import torch.nn as nn
+            import torch.optim as optim
+            from torch.utils.data import DataLoader, TensorDataset
+        except ImportError:
+            raise ImportError("PyTorch is required for torch model type. Install with: pip install torch")
+
+        # Define network architecture
+        class AssociationNet(nn.Module):
+            def __init__(self, input_dim):
+                super().__init__()
+                self.net = nn.Sequential(
+                    nn.Linear(input_dim, 64),
+                    nn.ReLU(),
+                    nn.Dropout(0.2),
+                    nn.Linear(64, 32),
+                    nn.ReLU(),
+                    nn.Dropout(0.2),
+                    nn.Linear(32, 16),
+                    nn.ReLU(),
+                    nn.Linear(16, 1)
+                )
+
+            def forward(self, x):
+                return self.net(x)
+
+        # Normalize features
+        X_mean = X.mean(axis=0)
+        X_std = X.std(axis=0) + 1e-8
+        X_norm = (X - X_mean) / X_std
+
+        # Convert to tensors
+        X_tensor = torch.FloatTensor(X_norm)
+        y_tensor = torch.FloatTensor(y).unsqueeze(1)
+
+        # Create data loader
+        dataset = TensorDataset(X_tensor, y_tensor)
+        loader = DataLoader(dataset, batch_size=256, shuffle=True)
+
+        # Initialize model
+        model = AssociationNet(X.shape[1])
+        criterion = nn.BCEWithLogitsLoss()
+        optimizer = optim.Adam(model.parameters(), lr=0.001)
+
+        # Training loop
+        n_epochs = 50
+        model.train()
+        for epoch in range(n_epochs):
+            total_loss = 0
+            for batch_X, batch_y in loader:
+                optimizer.zero_grad()
+                outputs = model(batch_X)
+                loss = criterion(outputs, batch_y)
+                loss.backward()
+                optimizer.step()
+                total_loss += loss.item()
+
+            if verbosity >= 2 and (epoch + 1) % 10 == 0:
+                print(f"   Epoch {epoch + 1}/{n_epochs}, Loss: {total_loss / len(loader):.4f}")
+
+        # Store normalization parameters
+        model._X_mean = X_mean
+        model._X_std = X_std
+
+        return model
+
+    def _associate_photons_to_events_ml(self, photons_df, events_df, max_dist_px=10.0, max_time_ns=500,
+                                        model=None, model_path=None, verbosity=0):
+        """
+        Associate photons to events using a trained ML model.
+
+        Similar to _associate_pixels_to_photons_ml but for photon-to-event association.
+
+        Args:
+            photons_df (pd.DataFrame): Photon DataFrame with 'x', 'y', 't' columns.
+            events_df (pd.DataFrame): Event DataFrame with 'x', 'y', 't', 'n', 'PSD' columns.
+            max_dist_px (float): Maximum spatial distance in pixels for candidate selection.
+            max_time_ns (float): Maximum time difference in nanoseconds for candidate selection.
+            model: Pre-trained ML model. If None, uses model_path or falls back to simple.
+            model_path (str): Path to saved model file.
+            verbosity (int): Verbosity level.
+
+        Returns:
+            pd.DataFrame: Photon DataFrame with added association columns.
+        """
+        # For now, fall back to simple method since photon-event association is simpler
+        # and the simple method already works well
+        if verbosity >= 1:
+            print("ML photon-event association not yet implemented, using simple method")
+        return self._associate_photons_to_events_simple_window(photons_df, events_df, max_dist_px,
+                                                               max_time_ns / 1e9, verbosity)
 
     def _standardize_column_names(self, df, verbosity=0):
         """
