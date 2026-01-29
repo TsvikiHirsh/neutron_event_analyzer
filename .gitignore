@@ -10,3 +10,4 @@ tests/__pycache__
 archive
 tests/test_data/test_cog_calculation
 tests/test_data/test_*
+notebooks/*.joblib

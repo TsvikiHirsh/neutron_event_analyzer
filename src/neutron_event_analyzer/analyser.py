@@ -626,9 +626,9 @@ class Analyse:
                     print(f"   Pixels: {original_len:,} → {len(self.pixels_df):,} (t <= {limit:.6f}s)")
             else:
                 original_len = len(self.pixels_df)
-                self.pixels_df = self.pixels_df.head(int(limit)).copy()
+                self.pixels_df = self.pixels_df.sort_values('t').head(int(limit)).copy()
                 if verbosity >= 2:
-                    print(f"   Pixels: {original_len:,} → {len(self.pixels_df):,} (first {int(limit)} rows)")
+                    print(f"   Pixels: {original_len:,} → {len(self.pixels_df):,} (earliest {int(limit)} rows)")
 
             # Cascade to photons: use max pixel TOA + buffer
             if len(self.pixels_df) > 0:
@@ -658,9 +658,9 @@ class Analyse:
                     print(f"   Pixels: {original_len:,} → {len(self.pixels_df):,} (t <= {limit:.6f}s)")
             else:
                 original_len = len(self.pixels_df)
-                self.pixels_df = self.pixels_df.head(int(limit)).copy()
+                self.pixels_df = self.pixels_df.sort_values('t').head(int(limit)).copy()
                 if verbosity >= 2:
-                    print(f"   Pixels: {original_len:,} → {len(self.pixels_df):,} (first {int(limit)} rows)")
+                    print(f"   Pixels: {original_len:,} → {len(self.pixels_df):,} (earliest {int(limit)} rows)")
 
             # Cascade to photons
             if len(self.pixels_df) > 0:
@@ -681,9 +681,9 @@ class Analyse:
                     print(f"   Photons: {original_len:,} → {len(self.photons_df):,} (t <= {limit:.6f}s)")
             else:
                 original_len = len(self.photons_df)
-                self.photons_df = self.photons_df.head(int(limit)).copy()
+                self.photons_df = self.photons_df.sort_values('t').head(int(limit)).copy()
                 if verbosity >= 2:
-                    print(f"   Photons: {original_len:,} → {len(self.photons_df):,} (first {int(limit)} rows)")
+                    print(f"   Photons: {original_len:,} → {len(self.photons_df):,} (earliest {int(limit)} rows)")
 
             # Cascade to events
             if len(self.photons_df) > 0:
@@ -700,17 +700,17 @@ class Analyse:
                 if limit_is_time:
                     self.pixels_df = self.pixels_df[self.pixels_df['t'] <= limit].copy()
                 else:
-                    self.pixels_df = self.pixels_df.head(int(limit)).copy()
+                    self.pixels_df = self.pixels_df.sort_values('t').head(int(limit)).copy()
             if has_photons:
                 if limit_is_time:
                     self.photons_df = self.photons_df[self.photons_df['t'] <= limit].copy()
                 else:
-                    self.photons_df = self.photons_df.head(int(limit)).copy()
+                    self.photons_df = self.photons_df.sort_values('t').head(int(limit)).copy()
             if has_events:
                 if limit_is_time:
                     self.events_df = self.events_df[self.events_df['t'] <= limit].copy()
                 else:
-                    self.events_df = self.events_df.head(int(limit)).copy()
+                    self.events_df = self.events_df.sort_values('t').head(int(limit)).copy()
 
     def _convert_event_file(self, eventfile, tmp_dir, verbosity=0):
         """
