@@ -32,6 +32,16 @@ class EMPIRParameterOptimizer:
     identify optimal parameters.
     """
 
+    # Map from standardized column names back to the names expected by diagnostics
+    _UNSTANDARDIZE_MAP = {
+        'px/x': 'x', 'px/y': 'y', 'px/toa': 't', 'px/tot': 'tot', 'px/tof': 'tof',
+        'ph/id': 'assoc_photon_id', 'ph/x': 'assoc_phot_x', 'ph/y': 'assoc_phot_y',
+        'ph/toa': 'assoc_phot_t', 'ph/cog': 'pixel_com_dist', 'ph/n': 'ph_n',
+        'ev/id': 'assoc_event_id', 'ev/x': 'assoc_x', 'ev/y': 'assoc_y',
+        'ev/toa': 'assoc_t', 'ev/n': 'assoc_n', 'ev/psd': 'assoc_PSD',
+        'ev/cog': 'assoc_com_dist',
+    }
+
     def __init__(self, analyser: nea.Analyse, verbosity: int = 1):
         """
         Initialize the EMPIR parameter optimizer.
@@ -44,6 +54,17 @@ class EMPIRParameterOptimizer:
         self.verbosity = verbosity
         self.diagnostics = None
         self.analyzer = DistributionAnalyzer()
+
+    @classmethod
+    def _prepare_for_diagnostics(cls, df):
+        """Reverse column standardization and add derived columns for diagnostics."""
+        # Reverse standardized column names
+        reverse_map = {k: v for k, v in cls._UNSTANDARDIZE_MAP.items() if k in df.columns}
+        df = df.rename(columns=reverse_map)
+        # Add toa_ns (nanoseconds) from t (seconds) if available
+        if 't' in df.columns:
+            df['toa_ns'] = df['t'] * 1e9
+        return df
 
     def optimize_pixel2photon(
         self,
@@ -74,14 +95,17 @@ class EMPIRParameterOptimizer:
             print("EMPIR Pixel-to-Photon Parameter Optimization")
             print("="*70)
 
-        # Get associated data
+        # Get associated data and prepare for diagnostics
         df = self.analyser.get_combined_dataframe()
+        if df is None:
+            raise ValueError("Need pixel-photon association. Run associate() first.")
+        df = self._prepare_for_diagnostics(df)
         if self.verbosity >= 2:
             print(f"DEBUG: Combined dataframe has {len(df)} rows")
             print(f"DEBUG: Columns: {df.columns.tolist()}")
-        if df is None or 'assoc_photon_id' not in df.columns:
+        if 'assoc_photon_id' not in df.columns:
             if self.verbosity >= 1:
-                print(f"Available columns: {df.columns.tolist() if df is not None else 'None'}")
+                print(f"Available columns: {df.columns.tolist()}")
             raise ValueError("Need pixel-photon association. Run associate() first.")
 
         # Extract diagnostics
@@ -311,10 +335,11 @@ class EMPIRParameterOptimizer:
             print("EMPIR Photon-to-Event Parameter Optimization")
             print("="*70)
 
-        # Get data
+        # Get data and prepare for diagnostics
         df = self.analyser.get_combined_dataframe()
         if df is None:
             raise ValueError("Need associated data. Run associate() first.")
+        df = self._prepare_for_diagnostics(df)
 
         # Extract diagnostics
         self.diagnostics = EMPIRDiagnostics(
@@ -683,22 +708,22 @@ def optimize_empir_parameters(
 
             # For photon2event optimization, we need the photon-event associations
             # These are embedded in the pixel dataframe - extract unique photons
-            if stage == 'both' and 'assoc_phot_x' in pixels_associated_df.columns:
-                # Extract photon-level data from pixel associations
-                photon_cols = ['assoc_phot_x', 'assoc_phot_y', 'assoc_phot_t', 'assoc_event_id',
-                               'assoc_x', 'assoc_y', 'assoc_t', 'assoc_n', 'assoc_PSD']
+            if stage == 'both' and 'ph/x' in pixels_associated_df.columns:
+                # Extract photon-level data from pixel associations (standardized names)
+                photon_cols = ['ph/x', 'ph/y', 'ph/toa', 'ev/id',
+                               'ev/x', 'ev/y', 'ev/toa', 'ev/n', 'ev/psd']
                 available_cols = [col for col in photon_cols if col in pixels_associated_df.columns]
 
                 # Get unique photons (drop duplicates on photon coordinates)
                 photons_with_events = pixels_associated_df[available_cols].copy()
-                photons_with_events = photons_with_events.dropna(subset=['assoc_phot_x', 'assoc_phot_y', 'assoc_phot_t'])
-                photons_with_events = photons_with_events.drop_duplicates(subset=['assoc_phot_x', 'assoc_phot_y', 'assoc_phot_t'])
+                photons_with_events = photons_with_events.dropna(subset=['ph/x', 'ph/y', 'ph/toa'])
+                photons_with_events = photons_with_events.drop_duplicates(subset=['ph/x', 'ph/y', 'ph/toa'])
 
                 # Rename columns to match photon dataframe format
                 photons_with_events = photons_with_events.rename(columns={
-                    'assoc_phot_x': 'x',
-                    'assoc_phot_y': 'y',
-                    'assoc_phot_t': 't'
+                    'ph/x': 'x',
+                    'ph/y': 'y',
+                    'ph/toa': 't'
                 })
                 photons_associated_df = photons_with_events
         except Exception as e:
