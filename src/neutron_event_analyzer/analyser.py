@@ -232,6 +232,19 @@ class Analyse:
                 if verbosity >= 2:
                     print(f"⚠️  Could not load association results: {e}")
 
+        # Try to load pre-existing ML model
+        ml_model_file = os.path.join(data_folder, "AssociatedResults", "ml_association_model.joblib")
+        if os.path.exists(ml_model_file):
+            try:
+                import joblib
+                self._ml_association_model = joblib.load(ml_model_file)
+                if verbosity >= 1:
+                    print(f"📂 Auto-loaded ML model from: {ml_model_file}")
+            except Exception as e:
+                self._ml_association_model = None
+                if verbosity >= 2:
+                    print(f"⚠️  Could not load ML model: {e}")
+
         # Always load raw data (so user can re-run association or use different methods)
         # If any data type is requested (events, photons, or pixels)
         if events or photons or pixels:
@@ -4139,19 +4152,26 @@ class Analyse:
             # Predict association probabilities
             try:
                 if hasattr(model, 'predict_proba'):
-                    # sklearn classifier
-                    proba = model.predict_proba(features)
+                    # sklearn classifier - apply scaler if model was trained with one
+                    inference_features = features
+                    if hasattr(model, '_scaler'):
+                        inference_features = model._scaler.transform(features)
+                    proba = model.predict_proba(inference_features)
                     # Handle single-class case (only positive or only negative in training)
                     if proba.shape[1] == 1:
                         probs = proba[:, 0] if model.classes_[0] == 1 else 1 - proba[:, 0]
                     else:
                         probs = proba[:, 1]
                 elif hasattr(model, 'forward'):
-                    # PyTorch model
+                    # PyTorch model - apply stored normalization if available
                     import torch
                     model.eval()
                     with torch.no_grad():
-                        features_tensor = torch.FloatTensor(features)
+                        if hasattr(model, '_X_mean'):
+                            features_norm = (features - model._X_mean) / model._X_std
+                        else:
+                            features_norm = features
+                        features_tensor = torch.FloatTensor(features_norm)
                         probs = torch.sigmoid(model(features_tensor)).numpy().flatten()
                 else:
                     # Fallback: use model output directly
@@ -4293,7 +4313,6 @@ class Analyse:
             dist_to_centroid / max_dist_px,              # Distance from cluster centroid
             pix_tot / tot_mean,                          # ToT relative to mean
             np.full(n_pixels, n_pixels / 10),            # Cluster size feature
-            np.arange(n_pixels) / max(n_pixels - 1, 1),  # Pixel order in cluster
             np.abs(dt_ns) / max_time_ns                  # Absolute time offset
         ])
 
@@ -4414,9 +4433,17 @@ class Analyse:
                 print(f"   Training accuracy: {100 * acc:.1f}%")
                 print(f"   Training F1 score: {f1:.3f}")
 
-        # Save model if path provided
+        # Auto-save model to AssociatedResults
+        import joblib
+        auto_save_dir = os.path.join(self.data_folder, "AssociatedResults")
+        os.makedirs(auto_save_dir, exist_ok=True)
+        auto_save_path = os.path.join(auto_save_dir, "ml_association_model.joblib")
+        joblib.dump(model, auto_save_path)
+        if verbosity >= 1:
+            print(f"   Model auto-saved to: {auto_save_path}")
+
+        # Also save to explicit path if provided
         if save_path:
-            import joblib
             joblib.dump(model, save_path)
             if verbosity >= 1:
                 print(f"   Model saved to: {save_path}")
@@ -4477,6 +4504,10 @@ class Analyse:
             # Get labels: 1 if pixel was associated with THIS photon, 0 otherwise
             labels = (valid_pixels['assoc_photon_id'] == phot_id).astype(int).values
 
+            # Skip photons with no positive labels - these provide no useful training signal
+            if labels.sum() == 0:
+                continue
+
             # Subsample if too many
             if len(features) > samples_per_photon:
                 # Keep balanced positive/negative samples
@@ -4513,7 +4544,7 @@ class Analyse:
 
         # Create DataFrame
         feature_names = ['dist_norm', 'dx_norm', 'dy_norm', 'dt_norm', 'tot_norm',
-                        'dist_centroid', 'tot_rel', 'cluster_size', 'pixel_order', 'abs_dt']
+                        'dist_centroid', 'tot_rel', 'cluster_size', 'abs_dt']
         df = pd.DataFrame(X, columns=feature_names)
         df['label'] = y
 
