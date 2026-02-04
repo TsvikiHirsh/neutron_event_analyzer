@@ -24,6 +24,23 @@ except ImportError:
 logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# All scannable EMPIR parameters: settings key → EMPIR stage + JSON path
+SCAN_PARAM_MAP = {
+    'pixel2photon.dSpace':        {'stage': 'pixel2photon', 'section': 'pixel2photon', 'key': 'dSpace'},
+    'pixel2photon.dTime':         {'stage': 'pixel2photon', 'section': 'pixel2photon', 'key': 'dTime'},
+    'pixel2photon.nPxMin':        {'stage': 'pixel2photon', 'section': 'pixel2photon', 'key': 'nPxMin'},
+    'photon2event.dSpace_px':     {'stage': 'photon2event', 'section': 'photon2event', 'key': 'dSpace_px'},
+    'photon2event.dTime_s':       {'stage': 'photon2event', 'section': 'photon2event', 'key': 'dTime_s'},
+    'photon2event.durationMax_s': {'stage': 'photon2event', 'section': 'photon2event', 'key': 'durationMax_s'},
+}
+
+# Parameters that exist in settings but cannot be scanned
+UNSCANNABLE_PARAMS = {
+    'pixel2photon.TDC1': 'Boolean flag — not scannable with min/max/step.',
+    'photon2event.dTime_ext': 'Not used by EMPIR binary or association pipeline.',
+}
+
+
 class Analyse:
     @staticmethod
     def _is_groupby_folder(folder_path):
@@ -5158,6 +5175,57 @@ For more information, see: https://github.com/nuclear/neutron_event_analyzer
         with open(readme_path, 'w') as f:
             f.write(readme_content)
 
+    def _compute_distributional_stats(self):
+        """Compute mean/std/p10/p50/p90 for key columns in associated_df.
+
+        Returns:
+            dict: Mapping column name → {count, mean, std, p10, p50, p90}.
+                  Includes computed time-distance columns ph/dt and ev/dt.
+        """
+        if self.associated_df is None or len(self.associated_df) == 0:
+            return {}
+
+        df = self.associated_df
+        stats = {}
+
+        # Direct columns (skip ph/y, ev/y — symmetric with x)
+        columns = ['ph/x', 'ph/n', 'ph/cog', 'ph/toa',
+                    'ev/x', 'ev/n', 'ev/psd', 'ev/cog', 'ev/toa']
+
+        def _col_stats(series):
+            s = series.dropna()
+            if len(s) == 0:
+                return None
+            return {
+                'count': int(len(s)),
+                'mean': float(s.mean()),
+                'std': float(s.std()),
+                'p10': float(s.quantile(0.1)),
+                'p50': float(s.quantile(0.5)),
+                'p90': float(s.quantile(0.9)),
+            }
+
+        for col in columns:
+            if col in df.columns:
+                result = _col_stats(df[col])
+                if result:
+                    stats[col] = result
+
+        # Computed time-distance columns (analogous to ph/cog, ev/cog but for time)
+        # ph/dt: |pixel time - photon time|
+        if 'px/toa' in df.columns and 'ph/toa' in df.columns:
+            result = _col_stats((df['px/toa'] - df['ph/toa']).abs())
+            if result:
+                stats['ph/dt'] = result
+
+        # ev/dt: |photon time - event time|
+        if 'ph/toa' in df.columns and 'ev/toa' in df.columns:
+            result = _col_stats((df['ph/toa'] - df['ev/toa']).abs())
+            if result:
+                stats['ev/dt'] = result
+
+        return stats
+
     def save_associations(self, output_dir=None, filename="associated_data.csv", format='csv', verbosity=1):
         """
         Save associated results to a file.
@@ -5211,6 +5279,11 @@ For more information, see: https://github.com/nuclear/neutron_event_analyzer
         if self.last_photon_event_stats:
             stats_dict['photon_event'] = self.last_photon_event_stats
 
+        # Add distributional stats (mean/std/p10/p50/p90 for key columns)
+        dist_stats = self._compute_distributional_stats()
+        if dist_stats:
+            stats_dict['distributions'] = dist_stats
+
         if stats_dict:
             import json
             stats_path = os.path.join(output_dir, "association_stats.json")
@@ -5240,6 +5313,220 @@ For more information, see: https://github.com/nuclear/neutron_event_analyzer
             print(f"   Columns: {len(df_to_save.columns)}")
 
         return output_path
+
+    def scan_associate(self, param, values, method='simple', relax=1.0,
+                       limit=None, empir_binaries=None, n_threads=4,
+                       save_full=False, output_dir=None, verbosity=1):
+        """
+        Sensitivity scan: re-run EMPIR binaries + association for each parameter value.
+
+        For pixel2photon parameters (dSpace, dTime, nPxMin), re-runs both
+        pixel2photon and photon2event EMPIR stages. For photon2event parameters
+        (dSpace_px, dTime_s, durationMax_s), only re-runs the photon2event stage.
+
+        Args:
+            param (str): Parameter name from parameterSettings, e.g.
+                         'pixel2photon.dSpace', 'photon2event.dTime_s'.
+            values (array-like): Values to scan (in parameterSettings units).
+            method (str): Association method ('simple', 'kdtree', 'mystic'). Default 'simple'.
+            relax (float): Relax factor for association parameters. Default 1.0.
+            limit (int, optional): Limit rows loaded per data type for faster scanning.
+            empir_binaries (str, optional): Path to EMPIR binaries directory.
+                Falls back to self.export_dir or $EMPIR_PATH.
+            n_threads (int): Number of threads for EMPIR binary execution. Default 4.
+            save_full (bool): If True, save full association CSV per step. Default False.
+            output_dir (str, optional): Where to save results.
+                Default: <data_folder>/AssociatedResults.
+            verbosity (int): 0=silent, 1=progress, 2=detailed. Default 1.
+
+        Returns:
+            pd.DataFrame: Summary table with one row per scan value containing
+                association statistics and distributional stats.
+
+        Raises:
+            ValueError: If param is not scannable.
+            FileNotFoundError: If EMPIR binaries or raw data files are not found.
+
+        Example:
+            import numpy as np
+            results = assoc.scan_associate(
+                param='pixel2photon.dSpace',
+                values=np.arange(1, 6),
+                method='simple',
+                limit=5000
+            )
+        """
+        import copy
+
+        # 1. Validate param
+        if param in UNSCANNABLE_PARAMS:
+            raise ValueError(f"{param}: {UNSCANNABLE_PARAMS[param]}")
+        if param not in SCAN_PARAM_MAP:
+            scannable = ', '.join(sorted(SCAN_PARAM_MAP.keys()))
+            raise ValueError(
+                f"Unknown scan parameter '{param}'. "
+                f"Scannable parameters: {scannable}"
+            )
+
+        # 2. Resolve EMPIR binaries
+        bin_dir = empir_binaries or self.export_dir or os.environ.get('EMPIR_PATH')
+        if not bin_dir:
+            raise FileNotFoundError(
+                "EMPIR binaries required for scanning. "
+                "Pass empir_binaries= or set $EMPIR_PATH."
+            )
+        from .empir_runner import EMPIRRunner
+        runner = EMPIRRunner(
+            empir_binaries_dir=bin_dir,
+            verbosity=max(0, verbosity - 1)
+        )
+
+        # 3. Validate raw data exists
+        info = SCAN_PARAM_MAP[param]
+        if info['stage'] == 'pixel2photon':
+            tpx3_dir = os.path.join(self.data_folder, 'tpx3Files')
+            if not os.path.isdir(tpx3_dir) or not list(Path(tpx3_dir).glob('*.tpx3')):
+                raise FileNotFoundError(
+                    f"No .tpx3 files found in {tpx3_dir}. "
+                    f"Required for pixel2photon parameter scanning."
+                )
+        else:
+            photon_dir = os.path.join(self.data_folder, 'photonFiles')
+            if not os.path.isdir(photon_dir) or not list(Path(photon_dir).glob('*.empirphot')):
+                raise FileNotFoundError(
+                    f"No .empirphot files found in {photon_dir}. "
+                    f"Required for photon2event parameter scanning."
+                )
+
+        # 4. Base EMPIR params from settings
+        from .empir_runner import get_default_params
+        base_params = copy.deepcopy(self.settings) if self.settings else get_default_params()
+
+        out_dir = output_dir or os.path.join(self.data_folder, 'AssociatedResults')
+
+        # 5. Scan loop
+        rows = []
+        values = list(values)
+        for i, val in enumerate(values):
+            if verbosity >= 1:
+                print(f"  Scan {i+1}/{len(values)}: {param} = {val}")
+
+            # Build modified EMPIR params
+            empir_params = copy.deepcopy(base_params)
+            empir_params[info['section']][info['key']] = val
+
+            with tempfile.TemporaryDirectory(prefix=f"nea_scan_{i}_") as tmp:
+                if info['stage'] == 'pixel2photon':
+                    # Full re-run: pixel2photon + photon2event + export
+                    tpx3_dir = os.path.join(self.data_folder, 'tpx3Files')
+                    tmp_phot = os.path.join(tmp, 'photonFiles')
+                    tmp_evt = os.path.join(tmp, 'eventFiles')
+                    runner.run_pixel2photon(
+                        Path(tpx3_dir), Path(tmp_phot), empir_params, n_threads
+                    )
+                    runner.run_photon2event(
+                        Path(tmp_phot), Path(tmp_evt), empir_params, n_threads
+                    )
+                    runner.run_export_photons(
+                        Path(tmp_phot), Path(os.path.join(tmp, 'ExportedPhotons'))
+                    )
+                    runner.run_export_events(
+                        Path(tmp_evt), Path(os.path.join(tmp, 'ExportedEvents'))
+                    )
+                    # Pixel raw data doesn't change — symlink from original
+                    src_pixels = os.path.join(self.data_folder, 'ExportedPixels')
+                    if os.path.isdir(src_pixels):
+                        os.symlink(src_pixels, os.path.join(tmp, 'ExportedPixels'))
+                else:
+                    # Stage 2 only: photon2event + export events, symlink rest
+                    photon_dir = os.path.join(self.data_folder, 'photonFiles')
+                    tmp_evt = os.path.join(tmp, 'eventFiles')
+                    runner.run_photon2event(
+                        Path(photon_dir), Path(tmp_evt), empir_params, n_threads
+                    )
+                    runner.run_export_events(
+                        Path(tmp_evt), Path(os.path.join(tmp, 'ExportedEvents'))
+                    )
+                    # Symlink existing photon + pixel exports
+                    for subdir in ['ExportedPhotons', 'ExportedPixels']:
+                        src = os.path.join(self.data_folder, subdir)
+                        if os.path.isdir(src):
+                            os.symlink(src, os.path.join(tmp, subdir))
+
+                # Create fresh Analyse from temp/symlinked structure
+                scan_obj = Analyse(
+                    data_folder=tmp,
+                    settings=empir_params,
+                    verbosity=0,
+                    limit=limit,
+                    pixels=True, photons=True, events=True
+                )
+
+                # Run association
+                scan_obj.associate(method=method, relax=relax, verbosity=0)
+
+                # Collect stats
+                row = {'value': val}
+                stats = scan_obj.get_association_stats()
+                row['px_matched'] = stats.get('matched_pixels', 0)
+                row['px_total'] = stats.get('total_pixels', 0)
+                row['ph_matched'] = stats.get('matched_photons', 0)
+                row['ph_total'] = stats.get('total_photons', 0)
+
+                com = stats.get('com_quality', {})
+                for k in ['exact', 'good', 'acceptable', 'poor', 'failed']:
+                    row[f'com_{k}'] = com.get(k, 0)
+
+                pe = stats.get('photon_event', {})
+                if pe:
+                    row['ev_matched'] = pe.get('matched_events', 0)
+                    row['ev_total'] = pe.get('total_events', 0)
+
+                # Distributional stats
+                dist = scan_obj._compute_distributional_stats()
+                for col, col_stats in dist.items():
+                    prefix = col.replace('/', '_')
+                    for sname, sval in col_stats.items():
+                        row[f'{prefix}_{sname}'] = sval
+
+                rows.append(row)
+
+                # Save full table if requested
+                if save_full:
+                    os.makedirs(out_dir, exist_ok=True)
+                    short = param.split('.')[-1]
+                    scan_obj.save_associations(
+                        output_dir=out_dir,
+                        filename=f"associated_data_scan_{short}_{val}.csv",
+                        verbosity=0
+                    )
+
+        # Build results DataFrame
+        results_df = pd.DataFrame(rows)
+
+        # Save summary CSV + JSON
+        os.makedirs(out_dir, exist_ok=True)
+        safe = param.replace('.', '_')
+
+        csv_path = os.path.join(out_dir, f"sensitivity_{safe}.csv")
+        results_df.to_csv(csv_path, index=False)
+
+        json_path = os.path.join(out_dir, f"sensitivity_{safe}.json")
+        # Convert numpy types for JSON serialization
+        def _to_native(obj):
+            if isinstance(obj, (np.integer,)):
+                return int(obj)
+            if isinstance(obj, (np.floating,)):
+                return float(obj)
+            return obj
+
+        with open(json_path, 'w') as f:
+            json.dump(rows, f, indent=2, default=_to_native)
+
+        if verbosity >= 1:
+            print(f"  Summary saved to: {csv_path}")
+
+        return results_df
 
     def plot_stats(self, output_dir=None, verbosity=None, group=None, inline=False):
         """

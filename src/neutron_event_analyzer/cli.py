@@ -97,7 +97,15 @@ Examples:
   # Full control over association parameters
   nea-assoc /path/to/data --pixel-max-dist 10 --photon-dspace 60
 
+  # Sensitivity scan over pixel clustering distance (requires EMPIR binaries)
+  nea-assoc /path/to/data --binaries ./export --scan pixel2photon.dSpace --scan-min 1 --scan-max 5 --scan-step 1
+
+  # Scan photon2event time window with subset and full output
+  nea-assoc /path/to/data --binaries ./export --scan photon2event.dTime_s --scan-min 1e-6 --scan-max 10e-6 --scan-step 1e-6 --limit 5000 --save-full
+
 Available settings presets: in_focus, out_of_focus, fast_neutrons, hitmap
+Scannable parameters: pixel2photon.dSpace, pixel2photon.dTime, pixel2photon.nPxMin,
+                      photon2event.dSpace_px, photon2event.dTime_s, photon2event.durationMax_s
 
 For more information, visit: https://github.com/nuclear/neutron_event_analyzer
         """
@@ -232,6 +240,45 @@ For more information, visit: https://github.com/nuclear/neutron_event_analyzer
         help='Output file format (default: csv)'
     )
 
+    # Sensitivity scan
+    scan_group = parser.add_argument_group('sensitivity scan')
+    scan_group.add_argument(
+        '--scan',
+        type=str,
+        default=None,
+        metavar='PARAM',
+        help='Parameter to scan (e.g., pixel2photon.dSpace, photon2event.dTime_s). '
+             'Requires EMPIR binaries (--binaries or $EMPIR_PATH). '
+             'Use with --scan-min, --scan-max, --scan-step.'
+    )
+    scan_group.add_argument(
+        '--scan-min',
+        type=float,
+        default=None,
+        metavar='VALUE',
+        help='Minimum value for scan (in parameterSettings units)'
+    )
+    scan_group.add_argument(
+        '--scan-max',
+        type=float,
+        default=None,
+        metavar='VALUE',
+        help='Maximum value for scan (in parameterSettings units)'
+    )
+    scan_group.add_argument(
+        '--scan-step',
+        type=float,
+        default=None,
+        metavar='VALUE',
+        help='Step size for scan (in parameterSettings units)'
+    )
+    scan_group.add_argument(
+        '--save-full',
+        action='store_true',
+        default=False,
+        help='Save full association table for each scan step'
+    )
+
     # Verbosity and display
     display_group = parser.add_argument_group('display options')
     display_group.add_argument(
@@ -252,6 +299,41 @@ For more information, visit: https://github.com/nuclear/neutron_event_analyzer
     )
 
     return parser
+
+
+def _print_scan_summary(param_name, results_df):
+    """Print a formatted summary table of sensitivity scan results."""
+    short = param_name.split('.')[-1]
+    print(f"\n{'=' * 78}")
+    print(f" Sensitivity Scan: {param_name}")
+    print(f"{'=' * 78}")
+
+    # Build header with available distributional columns
+    header = f"  {short:>10} | {'Px Match':>10} | {'Ph Match':>10}"
+    dist_cols = []
+    for c in ['ph_n_mean', 'ph_n_std', 'ph_cog_mean', 'ph_dt_mean',
+              'ev_n_mean', 'ev_psd_mean', 'ev_dt_mean']:
+        if c in results_df.columns:
+            dist_cols.append(c)
+            # Format label: ph_n_mean → ph/n avg
+            label = c.replace('_mean', ' avg').replace('_std', ' std')
+            label = label.replace('ph_', 'ph/').replace('ev_', 'ev/')
+            header += f" | {label:>10}"
+    print(header)
+    print('-' * len(header))
+
+    for _, r in results_df.iterrows():
+        px_total = r.get('px_total', 0)
+        ph_total = r.get('ph_total', 0)
+        px_pct = r['px_matched'] / px_total * 100 if px_total > 0 else 0
+        ph_pct = r['ph_matched'] / ph_total * 100 if ph_total > 0 else 0
+        line = f"  {r['value']:>10g} | {px_pct:>9.1f}% | {ph_pct:>9.1f}%"
+        for c in dist_cols:
+            val = r.get(c, 0)
+            line += f" | {val:>10.3g}"
+        print(line)
+
+    print(f"{'=' * 78}")
 
 
 def main_assoc():
@@ -339,6 +421,52 @@ def main_assoc():
     if analyser.is_groupby:
         if verbosity >= 1:
             print(f"\n✨ Will process all groups automatically")
+
+    # Handle sensitivity scan mode
+    if args.scan:
+        import numpy as np
+
+        if None in (args.scan_min, args.scan_max, args.scan_step):
+            print("Error: --scan requires --scan-min, --scan-max, and --scan-step")
+            sys.exit(1)
+
+        scan_values = np.arange(
+            args.scan_min,
+            args.scan_max + args.scan_step * 0.5,
+            args.scan_step
+        )
+
+        if verbosity >= 1:
+            print(f"\n🔍 Sensitivity scan: {args.scan}")
+            print(f"   Range: {args.scan_min} → {args.scan_max} (step {args.scan_step})")
+            print(f"   Steps: {len(scan_values)}")
+
+        try:
+            results_df = analyser.scan_associate(
+                param=args.scan,
+                values=scan_values,
+                method=args.method or 'simple',
+                relax=args.relax if hasattr(args, 'relax') and args.relax is not None else 1.0,
+                limit=args.limit,
+                empir_binaries=args.binaries or os.environ.get('EMPIR_PATH'),
+                n_threads=args.threads or 4,
+                save_full=args.save_full,
+                output_dir=args.output_dir,
+                verbosity=verbosity
+            )
+        except (ValueError, FileNotFoundError) as e:
+            print(f"\n❌ Error: {e}")
+            from .analyser import SCAN_PARAM_MAP
+            print(f"Scannable parameters: {', '.join(sorted(SCAN_PARAM_MAP.keys()))}")
+            sys.exit(1)
+
+        # Print formatted summary table
+        _print_scan_summary(args.scan, results_df)
+
+        if verbosity >= 1:
+            print(f"\n✅ Scan complete!")
+            print("=" * 70)
+        sys.exit(0)
 
     # Perform association using unified API
     if verbosity >= 1:
