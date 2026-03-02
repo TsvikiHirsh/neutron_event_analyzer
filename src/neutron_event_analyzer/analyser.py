@@ -599,7 +599,7 @@ class Analyse:
                 self.pixels_df = pd.DataFrame()
 
         # Correct pixel time offset if pixel and photon times use different references
-        self._correct_pixel_time_offset(verbosity=verbosity)
+        # self._correct_pixel_time_offset(verbosity=verbosity)
 
         # Apply cascading limits after all data is loaded
         self._apply_cascading_limits(limit=limit, relax=relax, verbosity=verbosity)
