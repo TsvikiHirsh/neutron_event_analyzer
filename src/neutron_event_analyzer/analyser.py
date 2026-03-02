@@ -598,6 +598,9 @@ class Analyse:
                 logger.error("No pixel data could be loaded. Check that ExportedPixels folder exists or empir binaries are available.")
                 self.pixels_df = pd.DataFrame()
 
+        # Correct pixel time offset if pixel and photon times use different references
+        self._correct_pixel_time_offset(verbosity=verbosity)
+
         # Apply cascading limits after all data is loaded
         self._apply_cascading_limits(limit=limit, relax=relax, verbosity=verbosity)
 
@@ -605,6 +608,133 @@ class Analyse:
         if limit is not None or query is not None:
             if events and photons:
                 self.pair_dfs = [(self.events_df, self.photons_df)]
+
+    def _correct_pixel_time_offset(self, verbosity=0):
+        """
+        Detect and correct time offset between pixel and photon timestamps.
+
+        The empir_export_pixelActivations binary may not include the TPX3 global timestamp,
+        resulting in a constant offset between pixel 't' and photon 't' columns. Since each
+        photon's timestamp equals the first pixel hit in that photon cluster, we can find
+        the exact offset by matching pixel and photon positions.
+
+        The correction is applied when:
+        1. Both pixel and photon data are loaded
+        2. The time ranges don't overlap
+        3. We can verify the offset by matching pixel/photon spatial coordinates
+
+        Args:
+            verbosity (int): Verbosity level (0=silent, 1=normal, 2=detailed)
+        """
+        # Only applicable when both pixel and photon data are loaded
+        if self.pixels_df is None or len(self.pixels_df) == 0:
+            return
+        if self.photons_df is None or len(self.photons_df) == 0:
+            return
+
+        pixel_t_min = self.pixels_df['t'].min()
+        pixel_t_max = self.pixels_df['t'].max()
+        photon_t_min = self.photons_df['t'].min()
+        photon_t_max = self.photons_df['t'].max()
+
+        # Check if times already overlap (no correction needed)
+        if pixel_t_max >= photon_t_min and photon_t_max >= pixel_t_min:
+            return
+
+        if verbosity >= 1:
+            print(f"   Pixel t range [{pixel_t_min:.3f}, {pixel_t_max:.3f}]s doesn't overlap with "
+                  f"photon t range [{photon_t_min:.3f}, {photon_t_max:.3f}]s")
+            print(f"   Attempting to align pixel timestamps with photon timestamps...")
+
+        # Find the offset by matching pixel and photon positions
+        # Each photon's timestamp should match the first pixel hit at that (x,y) position
+        offset = self._find_pixel_photon_time_offset(verbosity=verbosity)
+
+        if offset is None:
+            if verbosity >= 1:
+                print(f"   Warning: Could not determine pixel time offset. Pixel-photon association may fail.")
+            return
+
+        if verbosity >= 1:
+            print(f"   Applying pixel time offset: {offset:.6f}s")
+            print(f"   (Pixel t range [{pixel_t_min:.3f}, {pixel_t_max:.3f}]s → "
+                  f"[{pixel_t_min + offset:.3f}, {pixel_t_max + offset:.3f}]s)")
+
+        self.pixels_df['t'] = self.pixels_df['t'] + offset
+
+    def _find_pixel_photon_time_offset(self, n_samples=100, verbosity=0):
+        """
+        Find the time offset between pixel and photon timestamps by matching positions.
+
+        Since each photon's timestamp equals the timestamp of the first pixel in its cluster,
+        we can find photons at unique (x,y) positions and look for pixels at those same
+        positions. The time difference gives us the offset.
+
+        Args:
+            n_samples (int): Number of photon samples to try for matching
+            verbosity (int): Verbosity level
+
+        Returns:
+            float or None: The time offset to add to pixel timestamps, or None if not found
+        """
+        import numpy as np
+
+        # Get earliest photons (they're most likely to have matching pixels)
+        photons_sorted = self.photons_df.sort_values('t').head(n_samples * 10)
+
+        # Round coordinates for matching (integer pixel positions)
+        photons_sorted = photons_sorted.copy()
+        photons_sorted['x_int'] = photons_sorted['x'].round().astype(int)
+        photons_sorted['y_int'] = photons_sorted['y'].round().astype(int)
+
+        pixels_sorted = self.pixels_df.sort_values('t').copy()
+        pixels_sorted['x_int'] = pixels_sorted['x'].round().astype(int)
+        pixels_sorted['y_int'] = pixels_sorted['y'].round().astype(int)
+
+        # For each photon, find the earliest pixel at the same (x,y) position
+        offsets = []
+        matches_checked = 0
+
+        for _, photon in photons_sorted.iterrows():
+            if matches_checked >= n_samples:
+                break
+
+            # Find pixels at this position
+            matching_pixels = pixels_sorted[
+                (pixels_sorted['x_int'] == photon['x_int']) &
+                (pixels_sorted['y_int'] == photon['y_int'])
+            ]
+
+            if len(matching_pixels) == 0:
+                continue
+
+            # The first (earliest) pixel at this position should match the photon time
+            first_pixel = matching_pixels.iloc[0]
+            offset = photon['t'] - first_pixel['t']
+            offsets.append(offset)
+            matches_checked += 1
+
+        if len(offsets) < 10:
+            if verbosity >= 1:
+                print(f"   Warning: Only found {len(offsets)} pixel-photon position matches. "
+                      f"Cannot reliably determine offset.")
+            return None
+
+        # Check that offsets are consistent (should all be the same)
+        offsets = np.array(offsets)
+        median_offset = np.median(offsets)
+        offset_std = np.std(offsets)
+
+        # Allow for small timing jitter (1 microsecond)
+        if offset_std > 1e-6:
+            if verbosity >= 1:
+                print(f"   Warning: Offset inconsistent (std={offset_std*1e6:.2f}µs). "
+                      f"Using median={median_offset:.6f}s")
+
+        if verbosity >= 2:
+            print(f"   Found {len(offsets)} matches, offset={median_offset:.6f}s (std={offset_std*1e9:.1f}ns)")
+
+        return median_offset
 
     def _apply_cascading_limits(self, limit, relax=1.0, verbosity=0):
         """
@@ -1505,9 +1635,13 @@ class Analyse:
                 if verbosity >= 2:
                     print(f"⚠️  Warning: Could not auto-save results: {e}")
 
-        # Return HTML stats table for display
-        from IPython.display import HTML
-        return HTML(self._create_stats_html_table())
+        # Return HTML stats table for display (in Jupyter environments)
+        try:
+            from IPython.display import HTML
+            return HTML(self._create_stats_html_table())
+        except ImportError:
+            # IPython not available, return stats dict instead
+            return self.get_association_stats()
 
     def get_association_stats(self):
         """
@@ -1673,7 +1807,6 @@ class Analyse:
             assoc.compute_stats_from_csv()
         """
         import json
-        from IPython.display import HTML
 
         if self.is_groupby:
             # Process grouped folders
@@ -1838,8 +1971,13 @@ class Analyse:
                 if verbosity >= 1:
                     print(f"✅ Computed and saved stats to {stats_file}")
 
-        # Return HTML table
-        return HTML(self._create_stats_html_table())
+        # Return HTML table (in Jupyter environments)
+        try:
+            from IPython.display import HTML
+            return HTML(self._create_stats_html_table())
+        except ImportError:
+            # IPython not available, return stats dict instead
+            return self.get_association_stats()
 
     def _create_stats_html_table(self):
         """Create HTML table with metrics as columns and groups as rows."""
@@ -2522,9 +2660,13 @@ class Analyse:
             if verbosity >= 1:
                 print(f"💾 Saved results for {saved_count}/{len(results)} groups")
 
-        # Return HTML stats table for display
-        from IPython.display import HTML
-        return HTML(self._create_stats_html_table())
+        # Return HTML stats table for display (in Jupyter environments)
+        try:
+            from IPython.display import HTML
+            return HTML(self._create_stats_html_table())
+        except ImportError:
+            # IPython not available, return stats dict instead
+            return self.get_association_stats()
 
     def _associate_photons_to_events(self, photons_df, events_df, weight_px_in_s, max_time_s, verbosity):
         """
@@ -2988,12 +3130,11 @@ class Analyse:
         self, photons_df, events_df, dSpace_px, max_time_s, verbosity
     ):
         """
-        Associate photons to events using a simple forward time-window approach.
+        Associate photons to events using a two-pass approach with conflict resolution.
 
-        This method is optimized for speed when photons and events are almost sorted by time and windows are small.
-        For each event, it considers photons in [event_t, event_t + max_time_s], selects the n spatially closest photons,
-        computes the center-of-mass (CoG) distance (or single distance for n=1), and assigns only if <= dSpace_px.
-        Adds 'assoc_com_dist' for the CoG distance and 'assoc_status' as categorical ('cog_match' if assigned).
+        Pass 1: For each event, find candidate photons and compute CoM distance.
+        Pass 2: Resolve conflicts where a photon is claimed by multiple events,
+                preferring the event with the best (smallest) CoM distance.
 
         Args:
             photons_df (pd.DataFrame): Photon DataFrame with 'x', 'y', 't' columns.
@@ -3035,9 +3176,14 @@ class Analyse:
         p_x = photons['x'].to_numpy()
         p_y = photons['y'].to_numpy()
 
-        left = 0
         n_total = len(photons)
 
+        # Pass 1: Build candidate assignments for each event
+        # Store: {photon_idx: [(event_id, com_dist, event_data), ...]}
+        photon_candidates = {}  # photon_idx -> list of (event_id, com_dist, spatial_diff, time_diff, event_data)
+        event_candidates = {}   # event_id -> list of photon indices
+
+        left = 0
         for _, ev in tqdm(events.iterrows(), total=len(events), desc="Associating events", disable=(verbosity == 0)):
             et, ex, ey, eid, n = ev['t'], ev['x'], ev['y'], ev['event_id'], int(ev['n'])
             psd = ev.get('PSD', 0)
@@ -3076,21 +3222,53 @@ class Analyse:
             if com_dist > dSpace_px:
                 continue
 
-            # Assign if CoG matches
+            # Record this event's claim on these photons
             selected_global_idx = sub_idx[top_n_indices]
+            event_data = {'ex': ex, 'ey': ey, 'et': et, 'n': n, 'psd': psd}
+            event_candidates[eid] = list(selected_global_idx)
+
             for i, loc_idx in enumerate(selected_global_idx):
-                # Skip if already assigned
-                if np.isnan(photons.loc[loc_idx, 'assoc_event_id']):
-                    photons.loc[loc_idx, 'assoc_event_id'] = eid
-                    photons.loc[loc_idx, 'assoc_x'] = ex
-                    photons.loc[loc_idx, 'assoc_y'] = ey
-                    photons.loc[loc_idx, 'assoc_t'] = et
-                    photons.loc[loc_idx, 'assoc_n'] = n
-                    photons.loc[loc_idx, 'assoc_PSD'] = psd
-                    photons.loc[loc_idx, 'time_diff_ns'] = (sub_t[top_n_indices[i]] - et) * 1e9
-                    photons.loc[loc_idx, 'spatial_diff_px'] = spatial_diffs[top_n_indices[i]]
-                    photons.loc[loc_idx, 'assoc_com_dist'] = com_dist
-                    photons.loc[loc_idx, 'assoc_status'] = 'cog_match'
+                time_diff = (sub_t[top_n_indices[i]] - et) * 1e9
+                spatial_diff = spatial_diffs[top_n_indices[i]]
+
+                if loc_idx not in photon_candidates:
+                    photon_candidates[loc_idx] = []
+                photon_candidates[loc_idx].append((eid, com_dist, spatial_diff, time_diff, event_data))
+
+        # Pass 2: Resolve conflicts - assign each photon to the event with best CoM distance
+        # Track which events got all their requested photons
+        event_assigned_count = {eid: 0 for eid in event_candidates}
+
+        for loc_idx, candidates in photon_candidates.items():
+            if len(candidates) == 1:
+                # No conflict - assign directly
+                eid, com_dist, spatial_diff, time_diff, event_data = candidates[0]
+                photons.loc[loc_idx, 'assoc_event_id'] = eid
+                photons.loc[loc_idx, 'assoc_x'] = event_data['ex']
+                photons.loc[loc_idx, 'assoc_y'] = event_data['ey']
+                photons.loc[loc_idx, 'assoc_t'] = event_data['et']
+                photons.loc[loc_idx, 'assoc_n'] = event_data['n']
+                photons.loc[loc_idx, 'assoc_PSD'] = event_data['psd']
+                photons.loc[loc_idx, 'time_diff_ns'] = time_diff
+                photons.loc[loc_idx, 'spatial_diff_px'] = spatial_diff
+                photons.loc[loc_idx, 'assoc_com_dist'] = com_dist
+                photons.loc[loc_idx, 'assoc_status'] = 'cog_match'
+                event_assigned_count[eid] += 1
+            else:
+                # Conflict - pick the event with the best (smallest) CoM distance
+                best = min(candidates, key=lambda x: x[1])  # Sort by com_dist
+                eid, com_dist, spatial_diff, time_diff, event_data = best
+                photons.loc[loc_idx, 'assoc_event_id'] = eid
+                photons.loc[loc_idx, 'assoc_x'] = event_data['ex']
+                photons.loc[loc_idx, 'assoc_y'] = event_data['ey']
+                photons.loc[loc_idx, 'assoc_t'] = event_data['et']
+                photons.loc[loc_idx, 'assoc_n'] = event_data['n']
+                photons.loc[loc_idx, 'assoc_PSD'] = event_data['psd']
+                photons.loc[loc_idx, 'time_diff_ns'] = time_diff
+                photons.loc[loc_idx, 'spatial_diff_px'] = spatial_diff
+                photons.loc[loc_idx, 'assoc_com_dist'] = com_dist
+                photons.loc[loc_idx, 'assoc_status'] = 'cog_match'
+                event_assigned_count[eid] += 1
 
         photons['assoc_status'] = photons['assoc_status'].astype('category')
 
