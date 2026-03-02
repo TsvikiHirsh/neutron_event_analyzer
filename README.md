@@ -1,197 +1,140 @@
-# Neutron Event Analyzer
+# Neutron Event Analyzer (NEA)
 
-Analyze event-by-event data from neutron event cameras and optimize EMPIR reconstruction parameters.
+Associate pixels → photons → events from neutron event camera data.
 
-## Quick Start
+> **Note:** NEA assumes `ExportedPixels/`, `ExportedPhotons/`, and `ExportedEvents/`
+> directories already exist (produced by [empirun](https://github.com/TsvikiHirsh/empirun)).
+> Its sole job is to build the associated table.
+
+## TLDR
 
 ```bash
-# Install
 pip install git+https://github.com/TsvikiHirsh/neutron_event_analyzer.git
 
-# Set path to EMPIR binaries (optional, used for reconstruction)
-export EMPIR_PATH=/path/to/empir/binaries
+# Associate data in a folder
+nea-assoc ./my_data
 
-# Get parameter suggestions for EMPIR reconstruction
-nea-suggest /path/to/data
+# Use a settings preset and tag the output
+nea-assoc ./my_data --settings in_focus --suffix run1
 
-# Run association analysis
-nea-assoc /path/to/data --settings in_focus
+# Use ML-based association
+nea-assoc ./my_data --method ml
 ```
 
-## What It Does
+Output: `my_data/AssociatedResults/associated_data[_suffix].csv`
 
-This tool analyzes EMPIR reconstruction data and suggests optimal parameters for:
+---
 
-- **pixel2photon**: Clustering pixels into photons (`dSpace`, `dTime`, `nPxMin`, `nPxMax`)
-- **photon2event**: Clustering photons into events (`dSpace_px`, `dTime_s`, `durationMax_s`)
+## Install
 
-The suggestions are based on statistical analysis of reconstruction outputs - **no ground truth required**.
-
-## Installation
-
-### Requirements
-- Python ≥ 3.8
-- EMPIR binaries (for reconstruction)
-
-### Install
 ```bash
 git clone https://github.com/TsvikiHirsh/neutron_event_analyzer.git
 cd neutron_event_analyzer
 pip install -e .
+
+# For ML methods (sklearn + torch)
+pip install -e ".[ml]"
 ```
 
-## Data Structure
+## Data Layout
 
-Your data folder should contain:
 ```
-data_folder/
-├── tpx3Files/          # Raw pixel data
-│   └── *.tpx3
-├── photonFiles/        # Reconstructed photons
-│   └── *.empirphot
-└── eventFiles/         # Reconstructed events
-    └── *.empirevent
+my_data/
+├── ExportedPixels/      # CSV pixel files (from empirun)
+├── ExportedPhotons/     # CSV photon files
+└── ExportedEvents/      # CSV event files
 ```
 
-The tool will automatically:
-- Export files to CSV when needed
-- Run reconstruction if files are missing
-- Load and analyze the data
+NEA reads all CSVs from each directory, associates across tiers, and writes results to:
+
+```
+my_data/
+└── AssociatedResults/
+    ├── associated_data.csv        # Associated table
+    └── association_stats.json     # Match rates and distributions
+```
 
 ## CLI Usage
 
-### Parameter Optimization: `nea-suggest`
-
-Suggest optimal EMPIR reconstruction parameters based on data analysis.
-
-```bash
-# Basic usage
-nea-suggest <data> [options]
-
-# Examples
-nea-suggest ./my_data                              # Optimize both stages
-nea-suggest ./my_data --stage photon2event         # Specific stage only
-nea-suggest ./my_data --params current.json        # Use baseline
-nea-suggest ./my_data -q                           # Quiet mode
+```
+nea-assoc <data> [--settings PRESET|FILE] [--method METHOD] [--suffix TEXT] [-v] [-q]
 ```
 
-**Options:**
-- `--stage, -s`: Stage to optimize (`pixel2photon`, `photon2event`, `both`) [default: `both`]
-- `--params`: Current parameters JSON for comparison
-- `--output, -o`: Output file [default: `<data>/.suggestedSettingsParameters.json`]
-- `--binaries`: EMPIR binaries directory [default: `$EMPIR_PATH`]
-- `--verbose, -v`: Increase verbosity (`-vv` for debug)
-- `--quiet, -q`: Minimal output
+| Option | Description |
+|---|---|
+| `data` | Path to data folder |
+| `--settings, -s` | Preset or JSON file (`in_focus`, `out_of_focus`, `fast_neutrons`, `hitmap`) |
+| `--method, -m` | Association method: `simple` (default), `kdtree`, `window`, `mystic`, `ml` |
+| `--suffix` | Tag output files (e.g. `run1` → `associated_data_run1.csv`) |
+| `-v` / `-vv` | Verbose / debug output |
+| `-q` | Quiet mode |
+| `--advanced` | Reveal all advanced options |
 
-### Association Analysis: `nea-assoc`
-
-Associate pixels, photons, and events with configurable parameters.
+Show full option list:
 
 ```bash
-# Basic usage
-nea-assoc <data> [options]
-
-# Examples
-nea-assoc ./my_data                                # Auto-detect settings
-nea-assoc ./my_data --settings in_focus            # Use preset
-nea-assoc ./my_data --no-pixels                    # Skip pixel data
-nea-assoc ./my_data --photon-dspace 60             # Custom parameters
+nea-assoc --advanced --help
 ```
 
-**Options:**
-- `--settings, -s`: Settings preset or JSON file
-- `--binaries`: EMPIR binaries directory [default: `$EMPIR_PATH`]
-- `--no-events/--no-photons/--no-pixels`: Skip data types
-- `--photon-dspace`: Spatial clustering threshold
-- `--max-time`: Temporal window
-- `--output-dir, -o`: Output directory
-- `--verbose, -v`: Increase verbosity
-- `--quiet, -q`: Minimal output
+### Settings presets
+
+| Preset | Use case |
+|---|---|
+| `in_focus` | Standard in-focus neutron imaging |
+| `out_of_focus` | Defocused / divergent beam |
+| `fast_neutrons` | Fast neutron experiments |
+| `hitmap` | High-rate hitmap mode |
+
+A `parameterSettings.json` file in the data folder is auto-detected and used as settings.
+
+### Association methods
+
+| Method | Description |
+|---|---|
+| `simple` | Fast forward time-window with center-of-mass check (default) |
+| `kdtree` | KDTree on normalized space-time with iterative CoM refinement |
+| `window` | Symmetric sliding time-window KDTree |
+| `mystic` | Constrained optimization (requires `mystic` package) |
+| `ml` | Trained ML model (requires `scikit-learn`; trains automatically) |
 
 ## Python API
 
 ```python
 import neutron_event_analyzer as nea
 
-# Load and analyze data
-analyser = nea.Analyse(data_folder='./data')
+# Load and associate
+analyser = nea.Analyse('./my_data', settings='in_focus')
 analyser.load()
+analyser.associate(method='simple', suffix='run1')
 
-# Associate data (pixels → photons → events)
-analyser.associate(method='simple', verbosity=1)
+# Access results
+df = analyser.associated_df
+stats = analyser.get_association_stats()
 
-# Get combined dataframe
-df = analyser.get_combined_dataframe()
-
-# Compute event shapes
-analyser.compute_ellipticity()
-
-# Plot
-plotter = nea.Plotter(analyser)
-plotter.plot_event(event_id=1)
+# Save explicitly (also done automatically by associate())
+analyser.save_associations(output_dir='./results', suffix='run1')
 ```
 
-## How It Works
+### ML training
 
-The tool analyzes intrinsic distributions in reconstruction outputs:
-
-1. **Temporal Clustering**: Examines time differences within clusters to assess clustering quality
-2. **Spatial Clustering**: Analyzes spatial spread to detect over/under-clustering
-3. **Cluster Sizes**: Studies size distributions to suggest appropriate min/max thresholds
-4. **Event Quality**: Evaluates multiplicity and duration patterns
-
-Each parameter is optimized independently based on its specific impact on these distributions.
-
-## Output
-
-Results are saved as JSON with structure:
-```json
-{
-  "pixel2photon": {
-    "dSpace": 3.5,
-    "dTime": 1e-7,
-    "nPxMin": 3,
-    "nPxMax": 20
-  },
-  "photon2event": {
-    "dSpace_px": 75.0,
-    "dTime_s": 5e-8,
-    "durationMax_s": 5e-7
-  }
-}
+```python
+analyser.load()
+analyser.associate(method='simple')          # Bootstrap labels
+analyser.train_association_model()           # Train on bootstrapped data
+analyser.associate(method='ml', suffix='ml') # Re-associate with ML model
 ```
-
-## Documentation
-
-Full documentation: https://neutron-event-analyzer.readthedocs.io
-
-- [Parameter Optimization Guide](docs/parameter_optimization.md)
-- [API Reference](docs/api.md)
-- [Examples](docs/examples.md)
-
-## Contributing
-
-Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+MIT — see [LICENSE](LICENSE).
 
 ## Citation
-
-If you use this tool in your research, please cite:
 
 ```bibtex
 @software{neutron_event_analyzer,
   author = {Hirsh, Tsviki Y.},
-  title = {Neutron Event Analyzer},
-  url = {https://github.com/TsvikiHirsh/neutron_event_analyzer},
-  year = {2024}
+  title  = {Neutron Event Analyzer},
+  url    = {https://github.com/TsvikiHirsh/neutron_event_analyzer},
+  year   = {2024}
 }
 ```
-
-## Contact
-
-- **Author**: Tsviki Y. Hirsh
-- **Email**: tsviki.hirsh@gmail.com
-- **Issues**: https://github.com/TsvikiHirsh/neutron_event_analyzer/issues

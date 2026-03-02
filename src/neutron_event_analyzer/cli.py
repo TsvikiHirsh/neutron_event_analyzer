@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Command-line interface for Neutron Event Analyzer.
+nea-assoc: Associate neutron event camera data.
 
-This module provides two CLI tools:
-- nea-assoc: For running pixel-photon-event association
-- nea-optimize: For iterative parameter optimization
+Assumes ExportedPixels/, ExportedPhotons/, and ExportedEvents/ directories already
+exist under the data folder (produced by empirun). Associates the data across tiers
+and writes AssociatedResults/associated_data[_suffix].csv.
 """
 
 import argparse
@@ -15,1020 +15,332 @@ from pathlib import Path
 
 
 # =============================================================================
-# nea-assoc CLI - Association Tool
+# Simple / Advanced help toggle
 # =============================================================================
 
-def detect_settings_file(data_folder):
+def _is_advanced():
+    """Check whether --advanced flag is present in sys.argv."""
+    return '--advanced' in sys.argv
+
+
+_SIMPLE_EPILOG = """
+Examples:
+  nea-assoc ./run112_ZnS
+  nea-assoc ./data --settings in_focus
+  nea-assoc ./data --method ml
+  nea-assoc ./data --suffix run1
+
+Settings presets: in_focus, out_of_focus, fast_neutrons, hitmap
+Association methods: simple (default), kdtree, window, mystic, ml
+
+Run 'nea-assoc --advanced --help' to see all options.
+"""
+
+_ADVANCED_EPILOG = """
+Examples:
+  nea-assoc ./data --method ml --suffix run1
+  nea-assoc ./data --photon-dspace 60 --max-time 500
+  nea-assoc ./data --relax 1.5 --no-pixels --format parquet
+  nea-assoc ./data --limit 5000 --query "PSD > 0.5"
+
+Settings presets: in_focus, out_of_focus, fast_neutrons, hitmap
+Association methods: simple, kdtree, window, mystic, ml
+"""
+
+
+class _SmartHelpFormatter(argparse.HelpFormatter):
     """
-    Detect settings file in the data folder.
+    Custom formatter that hides advanced options when ``--advanced`` is absent.
 
-    Checks for .parameterSettings.json or parameterSettings.json.
-
-    Args:
-        data_folder (str): Path to data folder.
-
-    Returns:
-        str or None: Path to settings file if found, None otherwise.
+    Advanced actions are marked with ``action._advanced = True`` after
+    ``parser.add_argument()``.
     """
-    # Try both hidden and non-hidden versions
-    for filename in ['.parameterSettings.json', 'parameterSettings.json']:
-        settings_path = os.path.join(data_folder, filename)
-        if os.path.exists(settings_path):
-            return settings_path
-    return None
+
+    def add_arguments(self, actions):
+        if not _is_advanced():
+            actions = [a for a in actions if not getattr(a, '_advanced', False)]
+        super().add_arguments(actions)
+
+    def _format_usage(self, usage, actions, groups, prefix):
+        if not _is_advanced():
+            actions = [a for a in actions if not getattr(a, '_advanced', False)]
+        return super()._format_usage(usage, actions, groups, prefix)
 
 
-def validate_data_folder(data_folder):
-    """
-    Validate that the data folder exists and has expected structure.
+def _mark_advanced(action):
+    """Mark an argparse Action as advanced (hidden from simple help)."""
+    action._advanced = True
+    return action
 
-    Args:
-        data_folder (str): Path to data folder.
 
-    Returns:
-        dict: Information about what data is available.
-    """
-    if not os.path.exists(data_folder):
-        print(f"❌ Error: Data folder not found: {data_folder}")
-        sys.exit(1)
-
-    # Check for expected subdirectories
-    expected_dirs = {
-        'events': ['eventFiles', 'EventFiles', 'ExportedEvents'],
-        'photons': ['photonFiles', 'PhotonFiles', 'ExportedPhotons'],
-        'pixels': ['tpx3Files', 'Tpx3Files', 'TPX3Files', 'ExportedPixels']
-    }
-
-    available = {}
-    for data_type, possible_names in expected_dirs.items():
-        for name in possible_names:
-            path = os.path.join(data_folder, name)
-            if os.path.exists(path):
-                available[data_type] = True
-                break
-        else:
-            available[data_type] = False
-
-    return available
-
+# =============================================================================
+# Parser
+# =============================================================================
 
 def create_assoc_parser():
-    """Create argument parser for nea-assoc CLI."""
-    from .config import DEFAULT_PARAMS
+    """Build the argument parser for nea-assoc."""
+    epilog = _ADVANCED_EPILOG if _is_advanced() else _SIMPLE_EPILOG
 
     parser = argparse.ArgumentParser(
         prog='nea-assoc',
-        description='Neutron Event Analyzer - Associate pixels, photons, and events',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Basic usage - analyze folder with auto-detected settings
-  nea-assoc /path/to/run112_ZnS
-
-  # Use specific settings preset
-  nea-assoc /path/to/data --settings in_focus
-
-  # Custom settings file
-  nea-assoc /path/to/data --settings my_settings.json
-
-  # Adjust verbosity and disable pixels
-  nea-assoc /path/to/data --no-pixels -v 2
-
-  # Full control over association parameters
-  nea-assoc /path/to/data --pixel-max-dist 10 --photon-dspace 60
-
-  # Sensitivity scan over pixel clustering distance (requires EMPIR binaries)
-  nea-assoc /path/to/data --binaries ./export --scan pixel2photon.dSpace --scan-min 1 --scan-max 5 --scan-step 1
-
-  # Scan photon2event time window with subset and full output
-  nea-assoc /path/to/data --binaries ./export --scan photon2event.dTime_s --scan-min 1e-6 --scan-max 10e-6 --scan-step 1e-6 --limit 5000 --save-full
-
-Available settings presets: in_focus, out_of_focus, fast_neutrons, hitmap
-Scannable parameters: pixel2photon.dSpace, pixel2photon.dTime, pixel2photon.nPxMin,
-                      photon2event.dSpace_px, photon2event.dTime_s, photon2event.durationMax_s
-
-For more information, visit: https://github.com/nuclear/neutron_event_analyzer
-        """
+        description=(
+            'Associate neutron event camera data: pixels -> photons -> events.\n'
+            'Reads from ExportedPixels/, ExportedPhotons/, ExportedEvents/ directories.'
+        ),
+        formatter_class=_SmartHelpFormatter,
+        epilog=epilog,
     )
 
-    # Positional arguments
+    # ---- Positional --------------------------------------------------------
     parser.add_argument(
         'data',
         type=str,
-        help='Path to data folder'
+        help='Path to data folder',
     )
 
-    # Data loading options
-    data_group = parser.add_argument_group('data loading options')
-    data_group.add_argument(
-        '--no-events',
-        action='store_true',
-        help='Do not load event data'
-    )
-    data_group.add_argument(
-        '--no-photons',
-        action='store_true',
-        help='Do not load photon data'
-    )
-    data_group.add_argument(
-        '--no-pixels',
-        action='store_true',
-        help='Do not load pixel data'
-    )
-    data_group.add_argument(
-        '--limit',
-        type=int,
-        metavar='N',
-        help='Limit number of rows loaded per file (for testing)'
-    )
-    data_group.add_argument(
-        '--query',
-        type=str,
-        metavar='EXPR',
-        help='Pandas query expression to filter data (e.g., "PSD > 0.5")'
-    )
-
-    # Settings and configuration
-    settings_group = parser.add_argument_group('settings and configuration')
-    settings_group.add_argument(
+    # ---- Core options (always visible) -------------------------------------
+    parser.add_argument(
         '--settings', '-s',
         type=str,
         metavar='PRESET|FILE',
-        help='Settings preset name (in_focus, out_of_focus, etc.) or path to JSON settings file. '
-             'If not specified, will auto-detect .parameterSettings.json in data folder.'
+        help=(
+            'Settings preset (in_focus, out_of_focus, fast_neutrons, hitmap) '
+            'or path to parameterSettings JSON. Auto-detected if omitted.'
+        ),
     )
-    settings_group.add_argument(
-        '--binaries',
+    parser.add_argument(
+        '--method', '-m',
         type=str,
-        metavar='DIR',
-        help='EMPIR binaries directory (default: $EMPIR_PATH or ./export)'
+        choices=['simple', 'kdtree', 'window', 'mystic', 'ml'],
+        default='simple',
+        help='Association method (default: simple)',
     )
-    settings_group.add_argument(
-        '--threads', '-j',
-        type=int,
+    parser.add_argument(
+        '--suffix',
+        type=str,
+        metavar='TEXT',
         default=None,
-        metavar='N',
-        help='Number of threads for parallel processing (default: auto)'
+        help="Suffix for output files, e.g. 'run1' → associated_data_run1.csv",
+    )
+    parser.add_argument(
+        '--verbose', '-v',
+        action='count',
+        default=1,
+        help='Increase verbosity (-vv for debug output)',
+    )
+    parser.add_argument(
+        '--quiet', '-q',
+        action='store_true',
+        help='Suppress all output except errors',
+    )
+    parser.add_argument(
+        '--advanced',
+        action='store_true',
+        default=False,
+        help='Show advanced options in --help',
     )
 
-    # Association parameters
-    assoc_group = parser.add_argument_group('association parameters')
-    assoc_group.add_argument(
+    # ---- Data loading (advanced) -------------------------------------------
+    _mark_advanced(parser.add_argument(
+        '--no-events',
+        action='store_true',
+        help='Skip loading event data',
+    ))
+    _mark_advanced(parser.add_argument(
+        '--no-photons',
+        action='store_true',
+        help='Skip loading photon data',
+    ))
+    _mark_advanced(parser.add_argument(
+        '--no-pixels',
+        action='store_true',
+        help='Skip loading pixel data',
+    ))
+    _mark_advanced(parser.add_argument(
+        '--limit',
+        type=int,
+        metavar='N',
+        help='Limit rows loaded per CSV file (useful for quick tests)',
+    ))
+    _mark_advanced(parser.add_argument(
+        '--query',
+        type=str,
+        metavar='EXPR',
+        help='Pandas query expression to filter loaded data (e.g. "PSD > 0.5")',
+    ))
+
+    # ---- Association parameters (advanced) ---------------------------------
+    _mark_advanced(parser.add_argument(
         '--pixel-max-dist',
         type=float,
         metavar='PIXELS',
-        help='Maximum spatial distance for pixel-photon association (pixels)'
-    )
-    assoc_group.add_argument(
+        help='Max spatial distance for pixel-photon association (pixels)',
+    ))
+    _mark_advanced(parser.add_argument(
         '--pixel-max-time',
         type=float,
         metavar='NS',
-        help='Maximum time difference for pixel-photon association (nanoseconds)'
-    )
-    assoc_group.add_argument(
+        help='Max time window for pixel-photon association (nanoseconds)',
+    ))
+    _mark_advanced(parser.add_argument(
         '--photon-dspace',
         type=float,
         metavar='PIXELS',
-        help='Maximum center-of-mass distance for photon-event association (pixels)'
-    )
-    assoc_group.add_argument(
+        help='Max CoM distance for photon-event association (pixels)',
+    ))
+    _mark_advanced(parser.add_argument(
         '--max-time',
         type=float,
         metavar='NS',
-        help='Maximum time window for associations (nanoseconds)'
-    )
-    assoc_group.add_argument(
-        '--method', '-m',
-        type=str,
-        choices=['simple', 'kdtree', 'window', 'lumacam', 'auto'],
-        default='simple',
-        help='Association method for photon-event association. '
-             'simple: Fast forward time-window with CoM check (default). '
-             'kdtree: Full KDTree on normalized space-time. '
-             'window: Time-window KDTree for sorted data. '
-             'lumacam: Uses lumacamTesting library (if installed). '
-             'auto: Automatically choose based on data size.'
-    )
-    assoc_group.add_argument(
+        help='Max time window for photon-event association (nanoseconds)',
+    ))
+    _mark_advanced(parser.add_argument(
         '--relax',
         type=float,
         metavar='FACTOR',
-        help='Scale all association parameters by this factor (e.g., 1.5 = 50%% more relaxed). '
-             'Useful for improving poor matching rates. Default: 1.0 (no scaling)'
-    )
+        default=None,
+        help='Scale all association parameters by this factor (e.g. 1.5 = 50%% more relaxed)',
+    ))
 
-    # Output options
-    output_group = parser.add_argument_group('output options')
-    output_group.add_argument(
+    # ---- Output (advanced) -------------------------------------------------
+    _mark_advanced(parser.add_argument(
         '--output-dir', '-o',
         type=str,
         metavar='DIR',
-        help='Output directory (default: <data_folder>/AssociatedResults)'
-    )
-    output_group.add_argument(
-        '--output-file', '-f',
-        type=str,
-        default='associated_data.csv',
-        metavar='FILE',
-        help='Output filename (default: associated_data.csv)'
-    )
-    output_group.add_argument(
+        help='Output directory (default: <data>/AssociatedResults/)',
+    ))
+    _mark_advanced(parser.add_argument(
         '--format',
         type=str,
         choices=['csv', 'parquet'],
         default='csv',
-        help='Output file format (default: csv)'
-    )
+        help='Output file format (default: csv)',
+    ))
 
-    # Sensitivity scan
-    scan_group = parser.add_argument_group('sensitivity scan')
-    scan_group.add_argument(
-        '--scan',
-        type=str,
+    # ---- Performance (advanced) --------------------------------------------
+    _mark_advanced(parser.add_argument(
+        '--threads', '-j',
+        type=int,
         default=None,
-        metavar='PARAM',
-        help='Parameter to scan (e.g., pixel2photon.dSpace, photon2event.dTime_s). '
-             'Requires EMPIR binaries (--binaries or $EMPIR_PATH). '
-             'Use with --scan-min, --scan-max, --scan-step.'
-    )
-    scan_group.add_argument(
-        '--scan-min',
-        type=float,
-        default=None,
-        metavar='VALUE',
-        help='Minimum value for scan (in parameterSettings units)'
-    )
-    scan_group.add_argument(
-        '--scan-max',
-        type=float,
-        default=None,
-        metavar='VALUE',
-        help='Maximum value for scan (in parameterSettings units)'
-    )
-    scan_group.add_argument(
-        '--scan-step',
-        type=float,
-        default=None,
-        metavar='VALUE',
-        help='Step size for scan (in parameterSettings units)'
-    )
-    scan_group.add_argument(
-        '--save-full',
-        action='store_true',
-        default=False,
-        help='Save full association table for each scan step'
-    )
-
-    # Verbosity and display
-    display_group = parser.add_argument_group('display options')
-    display_group.add_argument(
-        '--verbose', '-v',
-        action='count',
-        default=1,
-        help='Increase verbosity (can be repeated: -v, -vv)'
-    )
-    display_group.add_argument(
-        '--quiet', '-q',
-        action='store_true',
-        help='Suppress all output except errors'
-    )
-    display_group.add_argument(
-        '--version',
-        action='version',
-        version='%(prog)s 1.0.0'
-    )
+        metavar='N',
+        help='Number of threads for parallel processing (default: 10)',
+    ))
 
     return parser
 
 
-def _print_scan_summary(param_name, results_df):
-    """Print a formatted summary table of sensitivity scan results."""
-    short = param_name.split('.')[-1]
-    print(f"\n{'=' * 78}")
-    print(f" Sensitivity Scan: {param_name}")
-    print(f"{'=' * 78}")
-
-    # Build header with available distributional columns
-    header = f"  {short:>10} | {'Px Match':>10} | {'Ph Match':>10}"
-    dist_cols = []
-    for c in ['ph_n_mean', 'ph_n_std', 'ph_cog_mean', 'ph_dt_mean',
-              'ev_n_mean', 'ev_psd_mean', 'ev_dt_mean']:
-        if c in results_df.columns:
-            dist_cols.append(c)
-            # Format label: ph_n_mean → ph/n avg
-            label = c.replace('_mean', ' avg').replace('_std', ' std')
-            label = label.replace('ph_', 'ph/').replace('ev_', 'ev/')
-            header += f" | {label:>10}"
-    print(header)
-    print('-' * len(header))
-
-    for _, r in results_df.iterrows():
-        px_total = r.get('px_total', 0)
-        ph_total = r.get('ph_total', 0)
-        px_pct = r['px_matched'] / px_total * 100 if px_total > 0 else 0
-        ph_pct = r['ph_matched'] / ph_total * 100 if ph_total > 0 else 0
-        line = f"  {r['value']:>10g} | {px_pct:>9.1f}% | {ph_pct:>9.1f}%"
-        for c in dist_cols:
-            val = r.get(c, 0)
-            line += f" | {val:>10.3g}"
-        print(line)
-
-    print(f"{'=' * 78}")
-
+# =============================================================================
+# Main entry point
+# =============================================================================
 
 def main_assoc():
-    """Main entry point for nea-assoc CLI."""
-    from . import Analyse
-    from .config import DEFAULT_PARAMS
+    """Entry point for the ``nea-assoc`` CLI command."""
+    from .analyser import Analyse
 
     parser = create_assoc_parser()
     args = parser.parse_args()
 
-    # Handle quiet mode
-    if args.quiet:
-        verbosity = 0
-    else:
-        verbosity = args.verbose
-
-    # Print banner
-    if verbosity >= 1:
-        print("=" * 70)
-        print("Neutron Event Analyzer - Association Tool")
-        print("=" * 70)
-        print(f"\n📁 Data folder: {args.data}")
-
-    # Detect or use settings
-    settings = args.settings
-    if settings is None:
-        # Try to auto-detect settings file
-        detected_settings = detect_settings_file(args.data)
-        if detected_settings:
-            settings = detected_settings
-            if verbosity >= 1:
-                print(f"⚙️  Auto-detected settings: {os.path.basename(detected_settings)}")
-    else:
-        if verbosity >= 1:
-            if settings in DEFAULT_PARAMS:
-                print(f"⚙️  Using settings preset: '{settings}'")
-            else:
-                print(f"⚙️  Using settings file: {settings}")
-
-    # Initialize analyzer with unified API (auto-detects groupby)
-    if verbosity >= 1:
-        print(f"\n🔧 Initializing analyzer...")
-
-    # Prepare analyzer kwargs
-    analyser_kwargs = {
-        'data_folder': args.data,
-        'settings': settings,
-        'n_threads': args.threads,
-        'verbosity': verbosity
-    }
-
-    # Add empir binary directory if specified (use EMPIR_PATH as fallback)
-    binaries = args.binaries or os.environ.get('EMPIR_PATH')
-    if binaries:
-        analyser_kwargs['export_dir'] = binaries
-        if verbosity >= 1:
-            if args.binaries:
-                print(f"   Using empir binaries from: {binaries}")
-            else:
-                print(f"   Using empir binaries from: {binaries} (from $EMPIR_PATH)")
-
-    # Determine what to load (only for non-groupby folders)
-    load_events = not args.no_events
-    load_photons = not args.no_photons
-    load_pixels = not args.no_pixels
-
-    analyser_kwargs.update({
-        'events': load_events,
-        'photons': load_photons,
-        'pixels': load_pixels,
-        'limit': args.limit,
-        'query': args.query
-    })
-
-    try:
-        analyser = Analyse(**analyser_kwargs)
-    except Exception as e:
-        print(f"\n❌ Error initializing analyzer: {e}")
-        import traceback
-        if verbosity >= 2:
-            traceback.print_exc()
-        sys.exit(1)
-
-    # If groupby was detected, inform user
-    if analyser.is_groupby:
-        if verbosity >= 1:
-            print(f"\n✨ Will process all groups automatically")
-
-    # Handle sensitivity scan mode
-    if args.scan:
-        import numpy as np
-
-        if None in (args.scan_min, args.scan_max, args.scan_step):
-            print("Error: --scan requires --scan-min, --scan-max, and --scan-step")
-            sys.exit(1)
-
-        scan_values = np.arange(
-            args.scan_min,
-            args.scan_max + args.scan_step * 0.5,
-            args.scan_step
-        )
-
-        if verbosity >= 1:
-            print(f"\n🔍 Sensitivity scan: {args.scan}")
-            print(f"   Range: {args.scan_min} → {args.scan_max} (step {args.scan_step})")
-            print(f"   Steps: {len(scan_values)}")
-
-        try:
-            results_df = analyser.scan_associate(
-                param=args.scan,
-                values=scan_values,
-                method=args.method or 'simple',
-                relax=args.relax if hasattr(args, 'relax') and args.relax is not None else 1.0,
-                limit=args.limit,
-                empir_binaries=args.binaries or os.environ.get('EMPIR_PATH'),
-                n_threads=args.threads or 4,
-                save_full=args.save_full,
-                output_dir=args.output_dir,
-                verbosity=verbosity
-            )
-        except (ValueError, FileNotFoundError) as e:
-            print(f"\n❌ Error: {e}")
-            from .analyser import SCAN_PARAM_MAP
-            print(f"Scannable parameters: {', '.join(sorted(SCAN_PARAM_MAP.keys()))}")
-            sys.exit(1)
-
-        # Print formatted summary table
-        _print_scan_summary(args.scan, results_df)
-
-        if verbosity >= 1:
-            print(f"\n✅ Scan complete!")
-            print("=" * 70)
-        sys.exit(0)
-
-    # Perform association using unified API
-    if verbosity >= 1:
-        print(f"\n🔗 Performing association...")
-
-    # Build association parameters
-    assoc_params = {
-        'verbosity': verbosity,
-        'method': args.method
-    }
-
-    # Add relax parameter if specified
-    if hasattr(args, 'relax') and args.relax is not None:
-        assoc_params['relax'] = args.relax
-
-    if args.pixel_max_dist is not None:
-        assoc_params['pixel_max_dist_px'] = args.pixel_max_dist
-    if args.pixel_max_time is not None:
-        assoc_params['pixel_max_time_ns'] = args.pixel_max_time
-    if args.photon_dspace is not None:
-        assoc_params['photon_dSpace_px'] = args.photon_dspace
-    if args.max_time is not None:
-        assoc_params['max_time_ns'] = args.max_time
-
-    try:
-        # Use unified API - works for both single and grouped
-        results = analyser.associate(**assoc_params)
-
-        if results is None or (isinstance(results, dict) and not results):
-            print("\n⚠️  Warning: Association produced no results")
-            sys.exit(0)
-
-        # Generate plots automatically
-        if verbosity >= 1:
-            print(f"\n📊 Generating plots...")
-
-        try:
-            plots = analyser.plot_stats(verbosity=verbosity)
-            if isinstance(plots, dict):
-                if verbosity >= 1:
-                    print(f"✅ Generated plots for {len(plots)} groups")
-            else:
-                if verbosity >= 1:
-                    print(f"✅ Generated {len(plots)} plots")
-        except Exception as e:
-            if verbosity >= 1:
-                print(f"⚠️  Warning: Could not generate plots: {e}")
-
-    except Exception as e:
-        print(f"\n❌ Error during association: {e}")
-        import traceback
-        if verbosity >= 2:
-            traceback.print_exc()
-        sys.exit(1)
-
-    # Save results
-    if verbosity >= 1:
-        print(f"\n💾 Saving results...")
-
-    try:
-        output_path = analyser.save_associations(
-            output_dir=args.output_dir,
-            filename=args.output_file,
-            format=args.format,
-            verbosity=verbosity
-        )
-
-        # Generate plots
-        if verbosity >= 1:
-            print(f"\n📊 Generating association quality plots...")
-
-        try:
-            plot_files = analyser.plot_stats(
-                output_dir=args.output_dir,
-                verbosity=verbosity
-            )
-        except Exception as e:
-            if verbosity >= 2:
-                print(f"⚠️  Warning: Could not generate plots: {e}")
-                import traceback
-                traceback.print_exc()
-
-        if verbosity >= 1:
-            print(f"\n✅ Analysis complete!")
-            print(f"   Results saved to: {output_path}")
-            print(f"   README available at: {os.path.join(os.path.dirname(output_path), 'README.md')}")
-
-    except Exception as e:
-        print(f"\n❌ Error saving results: {e}")
-        sys.exit(1)
-
-    if verbosity >= 1:
-        print("\n" + "=" * 70)
-
-
-# =============================================================================
-# nea-optimize CLI - Parameter Optimization Tool
-# =============================================================================
-
-def cmd_optimize(args):
-    """Iteratively optimize association parameters on real data."""
-    from neutron_event_analyzer.iterative_optimizer import IterativeOptimizer
-
-    print("Neutron Event Analyzer - Parameter Optimization")
-    print("=" * 70)
-
-    optimizer = IterativeOptimizer(
-        data_folder=args.data_folder,
-        initial_spatial_px=args.spatial,
-        initial_temporal_ns=args.temporal,
-        settings=args.settings,
-        method=args.method,
-        verbosity=args.verbose
-    )
-
-    best_result = optimizer.optimize(
-        max_iterations=args.iterations,
-        convergence_threshold=args.convergence,
-        output_dir=args.output
-    )
-
-    # Print final results
-    print("\n" + "=" * 70)
-    print("FINAL RESULTS")
-    print("=" * 70)
-    print(f"\nBest parameters (iteration {best_result.iteration}):")
-    print(f"  Spatial threshold:  {best_result.spatial_px:.2f} px")
-    print(f"  Temporal threshold: {best_result.temporal_ns:.2f} ns")
-    print(f"\nQuality metrics:")
-    print(f"  Association rate:   {best_result.association_rate:.2%}")
-    print(f"  Events found:       {best_result.total_events}")
-    print(f"  Photons per event:  {best_result.mean_photons_per_event:.1f}")
-
-    if args.output:
-        print(f"\n✓ Results saved to: {args.output}")
-        print(f"  Use: {args.output}/best_parameters.json")
-
-    # Show progress table
-    if args.verbose >= 1:
-        df = optimizer.get_progress_dataframe()
-        print(f"\n\nIteration History:")
-        print("=" * 70)
-        print(f"{'Iter':<6} {'Spatial (px)':<15} {'Temporal (ns)':<15} {'Assoc Rate':<12} {'Events':<8}")
-        print("-" * 70)
-        for _, row in df.iterrows():
-            print(f"{int(row['iteration']):<6} {row['spatial_px']:<15.2f} "
-                  f"{row['temporal_ns']:<15.2f} {row['association_rate']:<12.2%} "
-                  f"{int(row['total_events']):<8}")
-
-    return 0
-
-
-def cmd_suggest(args):
-    """Analyze data and suggest improved parameters."""
-    from neutron_event_analyzer.parameter_suggester import suggest_parameters_from_data
-
-    print("Neutron Event Analyzer - Parameter Suggestion")
-    print("=" * 70)
-
-    suggestion = suggest_parameters_from_data(
-        data_folder=args.data_folder,
-        current_spatial_px=args.spatial,
-        current_temporal_ns=args.temporal,
-        settings=args.settings,
-        method=args.method,
-        output_path=args.output,
-        verbosity=args.verbose
-    )
-
-    if args.output:
-        print(f"\n✓ Suggested parameters saved to: {args.output}")
-
-    return 0
-
-
-def cmd_analyze(args):
-    """Analyze association quality without suggesting changes."""
-    import neutron_event_analyzer as nea
-    from neutron_event_analyzer.parameter_suggester import ParameterSuggester
-
-    print("Neutron Event Analyzer - Association Quality Analysis")
-    print("=" * 70)
-
-    # Load and associate
-    analyser = nea.Analyse(
-        data_folder=args.data_folder,
-        settings=args.settings,
-        n_threads=1
-    )
-    analyser.load(verbosity=0)
-    analyser.associate_photons_events(
-        method=args.method,
-        dSpace_px=args.spatial,
-        max_time_ns=args.temporal
-    )
-
-    # Analyze
-    suggester = ParameterSuggester(analyser, verbosity=args.verbose)
-    metrics = suggester.analyze_quality()
-
-    # Save if requested
-    if args.output:
-        output_path = Path(args.output)
-        with open(output_path, 'w') as f:
-            json.dump(metrics.to_dict(), f, indent=2)
-        print(f"\n✓ Metrics saved to: {output_path}")
-
-    return 0
-
-
-def main_optimize():
-    """Main CLI entry point for nea-optimize."""
-    parser = argparse.ArgumentParser(
-        description='Neutron Event Analyzer - Parameter Optimization Tools',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Optimize parameters iteratively
-  nea-optimize optimize data/ --iterations 5 --output results/
-
-  # Quick parameter suggestion
-  nea-optimize suggest data/ --spatial 20 --temporal 100
-
-  # Analyze current association quality
-  nea-optimize analyze data/ --spatial 20 --temporal 100
-        """
-    )
-
-    subparsers = parser.add_subparsers(dest='command', help='Command to run')
-    subparsers.required = True
-
-    # Optimize command
-    optimize_parser = subparsers.add_parser(
-        'optimize',
-        help='Iteratively optimize parameters on real data'
-    )
-    optimize_parser.add_argument(
-        'data_folder',
-        help='Folder containing photon/event data'
-    )
-    optimize_parser.add_argument(
-        '--spatial', '-s',
-        type=float,
-        default=20.0,
-        help='Initial spatial threshold (pixels, default: 20.0)'
-    )
-    optimize_parser.add_argument(
-        '--temporal', '-t',
-        type=float,
-        default=100.0,
-        help='Initial temporal threshold (nanoseconds, default: 100.0)'
-    )
-    optimize_parser.add_argument(
-        '--iterations', '-n',
-        type=int,
-        default=5,
-        help='Maximum number of iterations (default: 5)'
-    )
-    optimize_parser.add_argument(
-        '--convergence', '-c',
-        type=float,
-        default=0.05,
-        help='Convergence threshold (default: 0.05)'
-    )
-    optimize_parser.add_argument(
-        '--method', '-m',
-        choices=['simple', 'kdtree', 'window', 'lumacam'],
-        default='simple',
-        help='Association method (default: simple)'
-    )
-    optimize_parser.add_argument(
-        '--settings',
-        help='Settings preset or path to settings file'
-    )
-    optimize_parser.add_argument(
-        '--output', '-o',
-        help='Output directory for results'
-    )
-    optimize_parser.add_argument(
-        '--verbose', '-v',
-        action='count',
-        default=1,
-        help='Increase verbosity (use -vv for more detail)'
-    )
-    optimize_parser.set_defaults(func=cmd_optimize)
-
-    # Suggest command
-    suggest_parser = subparsers.add_parser(
-        'suggest',
-        help='Analyze data and suggest improved parameters'
-    )
-    suggest_parser.add_argument(
-        'data_folder',
-        help='Folder containing photon/event data'
-    )
-    suggest_parser.add_argument(
-        '--spatial', '-s',
-        type=float,
-        default=20.0,
-        help='Current spatial threshold (pixels, default: 20.0)'
-    )
-    suggest_parser.add_argument(
-        '--temporal', '-t',
-        type=float,
-        default=100.0,
-        help='Current temporal threshold (nanoseconds, default: 100.0)'
-    )
-    suggest_parser.add_argument(
-        '--method', '-m',
-        choices=['simple', 'kdtree', 'window', 'lumacam'],
-        default='simple',
-        help='Association method (default: simple)'
-    )
-    suggest_parser.add_argument(
-        '--settings',
-        help='Settings preset or path to settings file'
-    )
-    suggest_parser.add_argument(
-        '--output', '-o',
-        help='Output file for suggested parameters (JSON)'
-    )
-    suggest_parser.add_argument(
-        '--verbose', '-v',
-        action='count',
-        default=1,
-        help='Increase verbosity'
-    )
-    suggest_parser.set_defaults(func=cmd_suggest)
-
-    # Analyze command
-    analyze_parser = subparsers.add_parser(
-        'analyze',
-        help='Analyze association quality metrics'
-    )
-    analyze_parser.add_argument(
-        'data_folder',
-        help='Folder containing photon/event data'
-    )
-    analyze_parser.add_argument(
-        '--spatial', '-s',
-        type=float,
-        default=20.0,
-        help='Spatial threshold (pixels, default: 20.0)'
-    )
-    analyze_parser.add_argument(
-        '--temporal', '-t',
-        type=float,
-        default=100.0,
-        help='Temporal threshold (nanoseconds, default: 100.0)'
-    )
-    analyze_parser.add_argument(
-        '--method', '-m',
-        choices=['simple', 'kdtree', 'window', 'lumacam'],
-        default='simple',
-        help='Association method (default: simple)'
-    )
-    analyze_parser.add_argument(
-        '--settings',
-        help='Settings preset or path to settings file'
-    )
-    analyze_parser.add_argument(
-        '--output', '-o',
-        help='Output file for metrics (JSON)'
-    )
-    analyze_parser.add_argument(
-        '--verbose', '-v',
-        action='count',
-        default=1,
-        help='Increase verbosity'
-    )
-    analyze_parser.set_defaults(func=cmd_analyze)
-
-    # Parse and execute
-    args = parser.parse_args()
-    return args.func(args)
-
-
-# =============================================================================
-# nea-empir CLI - EMPIR Parameter Optimization Tool
-# =============================================================================
-
-def main_suggest():
-    """Main CLI entry point for nea-suggest (EMPIR parameter optimization)."""
-    parser = argparse.ArgumentParser(
-        description='Suggest optimal EMPIR reconstruction parameters',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Basic usage (optimizes both pixel2photon and photon2event)
-  export EMPIR_PATH=/path/to/empir/binaries
-  nea-suggest /path/to/data
-
-  # Optimize only photon-to-event parameters
-  nea-suggest /path/to/data --stage photon2event
-
-  # Use parameter preset as baseline
-  nea-suggest /path/to/data --params fast_neutrons
-
-  # Use custom parameters file as baseline
-  nea-suggest /path/to/data --params my_params.json --output new_params.json
-
-Available parameter presets: in_focus, out_of_focus, fast_neutrons, hitmap
-
-For more information: https://neutron-event-analyzer.readthedocs.io
-        """
-    )
-
-    # Required argument
-    parser.add_argument(
-        'data',
-        type=str,
-        help='Path to data folder'
-    )
-
-    # Main options
-    parser.add_argument(
-        '--stage', '-s',
-        type=str,
-        choices=['pixel2photon', 'photon2event', 'both'],
-        default='both',
-        help='Reconstruction stage to optimize (default: both)'
-    )
-    parser.add_argument(
-        '--params',
-        type=str,
-        metavar='PRESET|FILE',
-        help='Parameter preset name (in_focus, out_of_focus, fast_neutrons, hitmap) or JSON file path'
-    )
-    parser.add_argument(
-        '--output', '-o',
-        type=str,
-        metavar='FILE',
-        help='Output file for suggestions (default: DATA/.suggestedSettingsParameters.json)'
-    )
-    parser.add_argument(
-        '--binaries',
-        type=str,
-        metavar='DIR',
-        help='EMPIR binaries directory (default: $EMPIR_PATH or ./export)'
-    )
-    parser.add_argument(
-        '--verbose', '-v',
-        action='count',
-        default=1,
-        help='Increase verbosity (-vv for debug)'
-    )
-    parser.add_argument(
-        '--quiet', '-q',
-        action='store_true',
-        help='Minimal output'
-    )
-    parser.add_argument(
-        '--version',
-        action='version',
-        version='%(prog)s 1.0.0'
-    )
-
-    args = parser.parse_args()
-
-    # Handle verbosity
     verbosity = 0 if args.quiet else args.verbose
 
-    # Determine EMPIR binaries path: CLI arg > env var > default
-    empir_binaries = args.binaries or os.environ.get('EMPIR_PATH', './export')
-
-    # Print banner
+    # ------------------------------------------------------------------
+    # Banner
+    # ------------------------------------------------------------------
     if verbosity >= 1:
-        print("=" * 70)
-        print("EMPIR Parameter Suggestions")
-        print("=" * 70)
-        print(f"\nData folder: {args.data}")
-        print(f"Stage: {args.stage}")
-        if args.binaries:
-            print(f"EMPIR binaries: {empir_binaries}")
-        elif os.environ.get('EMPIR_PATH'):
-            print(f"EMPIR binaries: {empir_binaries} (from $EMPIR_PATH)")
+        print("=" * 60)
+        print("Neutron Event Analyzer  |  nea-assoc")
+        print("=" * 60)
+        print(f"Data: {args.data}")
+        if args.settings:
+            print(f"Settings: {args.settings}")
+        print(f"Method: {args.method}")
+        if args.suffix:
+            print(f"Suffix: {args.suffix}")
 
-    # Load current parameters if provided
-    current_params = None
-    if args.params:
-        # First check if it's a preset name
-        from neutron_event_analyzer.config import DEFAULT_PARAMS
-        if args.params in DEFAULT_PARAMS:
-            current_params = DEFAULT_PARAMS[args.params]
-            if verbosity >= 1:
-                print(f"Current parameters: '{args.params}' preset")
-        else:
-            # Try to load as a file
-            try:
-                with open(args.params, 'r') as f:
-                    current_params = json.load(f)
-                if verbosity >= 1:
-                    print(f"Current parameters: {args.params}")
-            except Exception as e:
-                print(f"⚠️  Warning: Could not load parameters from '{args.params}'")
-                print(f"    Not a valid preset name or file path.")
-                print(f"    Available presets: {', '.join(DEFAULT_PARAMS.keys())}")
-                print("    Using defaults instead.")
-
-    # Set default output path if not specified
-    if not args.output:
-        args.output = os.path.join(args.data, ".suggestedSettingsParameters.json")
-
-    # Run optimization
+    # ------------------------------------------------------------------
+    # Initialise analyser
+    # ------------------------------------------------------------------
     try:
-        from neutron_event_analyzer.empir_optimizer import optimize_empir_parameters
-
-        results = optimize_empir_parameters(
+        analyser = Analyse(
             data_folder=args.data,
-            stage=args.stage,
-            current_params=current_params,
-            output_path=args.output,
+            settings=args.settings,
+            n_threads=args.threads or 10,
             verbosity=verbosity,
-            empir_binaries=empir_binaries
         )
-
-        # Display results with statistics
-        if verbosity >= 1:
-            for stage_name, suggestion in results.items():
-                print(suggestion)
-
-                # Display diagnostic statistics if available
-                if suggestion.diagnostics:
-                    print(f"\n📊 Diagnostic Statistics for {stage_name}:")
-                    print("─" * 70)
-                    for metric, value in suggestion.diagnostics.items():
-                        if isinstance(value, dict):
-                            # Display nested dict values with indentation
-                            print(f"  {metric}:")
-                            for sub_key, sub_value in value.items():
-                                if isinstance(sub_value, float):
-                                    print(f"    {sub_key:28s}: {sub_value:>12.4g}")
-                                elif isinstance(sub_value, int):
-                                    print(f"    {sub_key:28s}: {sub_value:>12,d}")
-                                else:
-                                    print(f"    {sub_key:28s}: {str(sub_value):>12}")
-                        elif isinstance(value, float):
-                            print(f"  {metric:30s}: {value:>12.4g}")
-                        elif isinstance(value, int):
-                            print(f"  {metric:30s}: {value:>12,d}")
-                        else:
-                            print(f"  {metric:30s}: {str(value):>12}")
-
-        if verbosity >= 1:
-            print(f"\n✅ Suggested parameters saved to: {args.output}")
-            print("\nNext steps:")
-            print(f"  1. Review the suggestions in {args.output}")
-            print("  2. Use these parameters in your EMPIR reconstruction")
-            print("  3. Re-run analysis to verify improvement")
-
     except Exception as e:
-        print(f"\n❌ Error during optimization: {e}")
+        print(f"Error: {e}")
         if verbosity >= 2:
             import traceback
             traceback.print_exc()
         sys.exit(1)
 
-    if verbosity >= 1:
-        print("\n" + "=" * 70)
+    # ------------------------------------------------------------------
+    # Load data
+    # ------------------------------------------------------------------
+    try:
+        analyser.load(
+            events=not args.no_events,
+            photons=not args.no_photons,
+            pixels=not args.no_pixels,
+            limit=args.limit,
+            query=args.query,
+            verbosity=verbosity,
+        )
+    except Exception as e:
+        print(f"Error loading data: {e}")
+        if verbosity >= 2:
+            import traceback
+            traceback.print_exc()
+        sys.exit(1)
 
-    return 0
+    # ------------------------------------------------------------------
+    # Associate
+    # ------------------------------------------------------------------
+    assoc_kwargs = {
+        'method': args.method,
+        'verbosity': verbosity,
+        'suffix': args.suffix,
+    }
+    if args.relax is not None:
+        assoc_kwargs['relax'] = args.relax
+    if args.pixel_max_dist is not None:
+        assoc_kwargs['pixel_max_dist_px'] = args.pixel_max_dist
+    if args.pixel_max_time is not None:
+        assoc_kwargs['pixel_max_time_ns'] = args.pixel_max_time
+    if args.photon_dspace is not None:
+        assoc_kwargs['photon_dSpace_px'] = args.photon_dspace
+    if args.max_time is not None:
+        assoc_kwargs['max_time_ns'] = args.max_time
+
+    try:
+        analyser.associate(**assoc_kwargs)
+    except Exception as e:
+        print(f"Error during association: {e}")
+        if verbosity >= 2:
+            import traceback
+            traceback.print_exc()
+        sys.exit(1)
+
+    # ------------------------------------------------------------------
+    # Save to user-specified output dir (if given)
+    # associate() already auto-saves to AssociatedResults/ by default.
+    # ------------------------------------------------------------------
+    if args.output_dir:
+        try:
+            out = analyser.save_associations(
+                output_dir=args.output_dir,
+                format=args.format,
+                suffix=args.suffix,
+                verbosity=verbosity,
+            )
+            if verbosity >= 1:
+                print(f"Also saved to: {out}")
+        except Exception as e:
+            print(f"Error saving to {args.output_dir}: {e}")
+            sys.exit(1)
+
+    if verbosity >= 1:
+        print("=" * 60)
 
 
 if __name__ == '__main__':
-    sys.exit(main_suggest())
+    sys.exit(main_assoc())
