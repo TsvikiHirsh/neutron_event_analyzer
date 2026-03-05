@@ -549,6 +549,9 @@ class Analyse:
         elif method == 'ml':
             return self._associate_pixels_to_photons_ml(
                 self.pixels_df, self.photons_df, max_dist_px, max_time_ns, verbosity=verbosity)
+        elif method == 'empir':
+            return self._associate_pixels_to_photons_empir(
+                self.pixels_df, self.photons_df, max_dist_px, max_time_ns, verbosity)
         else:
             return self._associate_pixels_to_photons_simple(
                 self.pixels_df, self.photons_df, max_dist_px, max_time_ns, verbosity)
@@ -1134,6 +1137,115 @@ class Analyse:
                     pixels.loc[i, 'assoc_phot_y'] = phot_y
                     pixels.loc[i, 'assoc_phot_t'] = phot_t
                     pixels.loc[i, 'pixel_com_dist'] = final_com_dist
+
+        self._store_pixel_photon_stats(pixels, photons, com_quality, verbosity)
+        return pixels
+
+    def _associate_pixels_to_photons_empir(self, pixels_df, photons_df,
+                                            max_dist_px=2.0, max_time_ns=50, verbosity=0):
+        """
+        Associate pixels to photons by replicating EMPIR's pixel2photon algorithm.
+
+        For each EMPIR photon at (ph/x, ph/y, ph/toa):
+          - Takes pixels in the forward window [ph/toa, ph/toa + dTime]
+          - Keeps those within dSpace (Euclidean) of the photon position
+          - Computes the weighted CoG (by px/tot) for verification
+
+        The weighted CoG of the selected pixels should match (ph/x, ph/y) to
+        ~2 decimal places for simple single-cluster cases.
+        """
+        if pixels_df is None or photons_df is None or len(pixels_df) == 0 or len(photons_df) == 0:
+            return pixels_df
+
+        pixels = pixels_df.copy()
+        photons = photons_df.copy()
+        pixels['assoc_photon_id'] = np.nan
+        pixels['assoc_phot_x'] = np.nan
+        pixels['assoc_phot_y'] = np.nan
+        pixels['assoc_phot_t'] = np.nan
+        pixels['pixel_com_dist'] = np.nan
+
+        pixels = pixels.sort_values('t').reset_index(drop=True)
+        photons = photons.sort_values('t').reset_index(drop=True)
+        photons['photon_id'] = photons.index + 1
+
+        pix_t   = pixels['t'].to_numpy()
+        pix_x   = pixels['x'].to_numpy()
+        pix_y   = pixels['y'].to_numpy()
+        pix_tot = pixels['tot'].to_numpy() if 'tot' in pixels.columns else np.ones(len(pixels))
+        assigned = np.zeros(len(pixels), dtype=bool)   # TDC1: each pixel fires once
+
+        max_time_s = max_time_ns / 1e9
+        TOL = 1e-12   # guard against float round-trip from CSV
+
+        n_px = len(pixels)
+        left = 0
+        com_quality = {'exact': 0, 'good': 0, 'acceptable': 0, 'poor': 0, 'failed': 0}
+
+        for _, phot in tqdm(photons.iterrows(), total=len(photons),
+                            desc="Associating pixels to photons", disable=(verbosity == 0)):
+            ph_t  = phot['t']
+            ph_x  = phot['x']
+            ph_y  = phot['y']
+            ph_id = phot['photon_id']
+
+            # Advance left: skip pixels clearly before this photon's window
+            while left < n_px and pix_t[left] < ph_t - TOL:
+                left += 1
+
+            # Right boundary of forward time window
+            right = left
+            while right < n_px and pix_t[right] <= ph_t + max_time_s + TOL:
+                right += 1
+
+            if right == left:
+                continue
+
+            sub_idx = np.arange(left, right)
+
+            # Spatial filter: Euclidean distance from EMPIR photon position
+            dx = pix_x[sub_idx] - ph_x
+            dy = pix_y[sub_idx] - ph_y
+            spatial_mask = (dx * dx + dy * dy) <= max_dist_px * max_dist_px
+
+            if not spatial_mask.any():
+                continue
+
+            cand_idx = sub_idx[spatial_mask]
+
+            # TDC1: skip pixels already claimed by an earlier photon
+            free_mask = ~assigned[cand_idx]
+            if not free_mask.any():
+                continue
+
+            final_idx  = cand_idx[free_mask]
+            final_x    = pix_x[final_idx]
+            final_y    = pix_y[final_idx]
+            final_tot  = pix_tot[final_idx]
+
+            # Weighted CoG — should reproduce EMPIR's ph/x, ph/y exactly
+            tot_sum = final_tot.sum() or 1.0
+            cog_x = (final_x * final_tot).sum() / tot_sum
+            cog_y = (final_y * final_tot).sum() / tot_sum
+            com_dist = np.sqrt((cog_x - ph_x) ** 2 + (cog_y - ph_y) ** 2)
+
+            if com_dist <= 0.05:
+                com_quality['exact'] += 1
+            elif com_dist <= 0.2:
+                com_quality['good'] += 1
+            elif com_dist <= 0.5:
+                com_quality['acceptable'] += 1
+            elif com_dist <= max_dist_px:
+                com_quality['poor'] += 1
+            else:
+                com_quality['failed'] += 1
+
+            assigned[final_idx] = True
+            pixels.loc[final_idx, 'assoc_photon_id'] = ph_id
+            pixels.loc[final_idx, 'assoc_phot_x']    = ph_x
+            pixels.loc[final_idx, 'assoc_phot_y']    = ph_y
+            pixels.loc[final_idx, 'assoc_phot_t']    = ph_t
+            pixels.loc[final_idx, 'pixel_com_dist']  = com_dist
 
         self._store_pixel_photon_stats(pixels, photons, com_quality, verbosity)
         return pixels

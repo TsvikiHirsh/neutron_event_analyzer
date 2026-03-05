@@ -31,7 +31,7 @@ Examples:
   nea-assoc ./data --suffix run1
 
 Settings presets: in_focus, out_of_focus, fast_neutrons, hitmap
-Association methods: simple (default), kdtree, window, mystic, ml
+Association methods: simple (default), kdtree, window, mystic, ml, empir
 
 Run 'nea-assoc --advanced --help' to see all options.
 """
@@ -111,7 +111,7 @@ def create_assoc_parser():
     parser.add_argument(
         '--method', '-m',
         type=str,
-        choices=['simple', 'kdtree', 'window', 'mystic', 'ml'],
+        choices=['simple', 'kdtree', 'window', 'mystic', 'ml', 'empir'],
         default='simple',
         help='Association method (default: simple)',
     )
