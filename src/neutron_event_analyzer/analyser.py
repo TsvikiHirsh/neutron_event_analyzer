@@ -1146,13 +1146,18 @@ class Analyse:
         """
         Associate pixels to photons by replicating EMPIR's pixel2photon algorithm.
 
-        For each EMPIR photon at (ph/x, ph/y, ph/toa):
-          - Takes pixels in the forward window [ph/toa, ph/toa + dTime]
-          - Keeps those within dSpace (Euclidean) of the photon position
-          - Computes the weighted CoG (by px/tot) for verification
+        Replicates EMPIR's hierarchical single-linkage pixel clustering (paper eq. 1-3).
 
-        The weighted CoG of the selected pixels should match (ph/x, ph/y) to
-        ~2 decimal places for simple single-cluster cases.
+        For each photon at (ph/x, ph/y, ph/toa):
+          - Candidates: all pixels in [ph/toa, ph/toa + dTime]
+          - Spatial: single-linkage flood-fill from the seed pixel (first pixel at
+            ph/toa); each found pixel becomes a new seed, so clusters larger than
+            dSpace are collected as long as pixels chain (dSpace=0 disables this)
+          - No TDC1: pixels are not exclusively claimed, matching EMPIR's global
+            clustering (last-writer wins for overlapping photon windows)
+          - CoG: weighted by px/tot (τ) per paper eq. (3)
+
+        The weighted CoG should match ph/x, ph/y exactly for isolated clusters.
         """
         if pixels_df is None or photons_df is None or len(pixels_df) == 0 or len(photons_df) == 0:
             return pixels_df
@@ -1173,7 +1178,6 @@ class Analyse:
         pix_x   = pixels['x'].to_numpy()
         pix_y   = pixels['y'].to_numpy()
         pix_tot = pixels['tot'].to_numpy() if 'tot' in pixels.columns else np.ones(len(pixels))
-        assigned = np.zeros(len(pixels), dtype=bool)   # TDC1: each pixel fires once
 
         max_time_s = max_time_ns / 1e9
         TOL = 1e-12   # guard against float round-trip from CSV
@@ -1181,6 +1185,15 @@ class Analyse:
         n_px = len(pixels)
         left = 0
         com_quality = {'exact': 0, 'good': 0, 'acceptable': 0, 'poor': 0, 'failed': 0}
+
+        # Output columns (pixels may be shared across photons — last write wins,
+        # matching EMPIR's global single-linkage clustering which produces disjoint
+        # clusters; for non-overlapping photons this is equivalent)
+        assoc_id  = np.full(n_px, np.nan)
+        assoc_x   = np.full(n_px, np.nan)
+        assoc_y   = np.full(n_px, np.nan)
+        assoc_t   = np.full(n_px, np.nan)
+        assoc_com = np.full(n_px, np.nan)
 
         for _, phot in tqdm(photons.iterrows(), total=len(photons),
                             desc="Associating pixels to photons", disable=(verbosity == 0)):
@@ -1193,7 +1206,7 @@ class Analyse:
             while left < n_px and pix_t[left] < ph_t - TOL:
                 left += 1
 
-            # Right boundary of forward time window
+            # Right boundary of forward time window [ph_t, ph_t + dTime]
             right = left
             while right < n_px and pix_t[right] <= ph_t + max_time_s + TOL:
                 right += 1
@@ -1202,28 +1215,40 @@ class Analyse:
                 continue
 
             sub_idx = np.arange(left, right)
+            cand_idx = sub_idx
+            cand_x   = pix_x[cand_idx]
+            cand_y   = pix_y[cand_idx]
 
-            # Spatial filter: Euclidean distance from EMPIR photon position
-            dx = pix_x[sub_idx] - ph_x
-            dy = pix_y[sub_idx] - ph_y
-            spatial_mask = (dx * dx + dy * dy) <= max_dist_px * max_dist_px
+            if max_dist_px > 0:
+                # Single-linkage region-growing (flood-fill) from seed pixel.
+                # The seed is the first pixel at ph_t (minimum toa = ph_t).
+                # Each found pixel becomes a new seed, so clusters can extend
+                # beyond max_dist_px by chaining through neighbours.
+                at_ph_t = np.where(np.abs(pix_t[sub_idx] - ph_t) <= TOL)[0]
+                if len(at_ph_t) == 0:
+                    continue
+                r2 = max_dist_px * max_dist_px
+                in_cluster = np.zeros(len(cand_idx), dtype=bool)
+                frontier = [at_ph_t[0]]
+                in_cluster[at_ph_t[0]] = True
+                while frontier:
+                    fi = frontier.pop()
+                    sx, sy = cand_x[fi], cand_y[fi]
+                    dx = cand_x - sx
+                    dy = cand_y - sy
+                    for ni in np.where((dx*dx + dy*dy) <= r2)[0]:
+                        if not in_cluster[ni]:
+                            in_cluster[ni] = True
+                            frontier.append(ni)
+                if not in_cluster.any():
+                    continue
+                cand_idx = cand_idx[in_cluster]
 
-            if not spatial_mask.any():
-                continue
+            final_x   = pix_x[cand_idx]
+            final_y   = pix_y[cand_idx]
+            final_tot = pix_tot[cand_idx]
 
-            cand_idx = sub_idx[spatial_mask]
-
-            # TDC1: skip pixels already claimed by an earlier photon
-            free_mask = ~assigned[cand_idx]
-            if not free_mask.any():
-                continue
-
-            final_idx  = cand_idx[free_mask]
-            final_x    = pix_x[final_idx]
-            final_y    = pix_y[final_idx]
-            final_tot  = pix_tot[final_idx]
-
-            # Weighted CoG — should reproduce EMPIR's ph/x, ph/y exactly
+            # Weighted CoG by ToT — replicates EMPIR eq. (3)
             tot_sum = final_tot.sum() or 1.0
             cog_x = (final_x * final_tot).sum() / tot_sum
             cog_y = (final_y * final_tot).sum() / tot_sum
@@ -1240,12 +1265,17 @@ class Analyse:
             else:
                 com_quality['failed'] += 1
 
-            assigned[final_idx] = True
-            pixels.loc[final_idx, 'assoc_photon_id'] = ph_id
-            pixels.loc[final_idx, 'assoc_phot_x']    = ph_x
-            pixels.loc[final_idx, 'assoc_phot_y']    = ph_y
-            pixels.loc[final_idx, 'assoc_phot_t']    = ph_t
-            pixels.loc[final_idx, 'pixel_com_dist']  = com_dist
+            assoc_id[cand_idx]  = ph_id
+            assoc_x[cand_idx]   = ph_x
+            assoc_y[cand_idx]   = ph_y
+            assoc_t[cand_idx]   = ph_t
+            assoc_com[cand_idx] = com_dist
+
+        pixels['assoc_photon_id'] = assoc_id
+        pixels['assoc_phot_x']    = assoc_x
+        pixels['assoc_phot_y']    = assoc_y
+        pixels['assoc_phot_t']    = assoc_t
+        pixels['pixel_com_dist']  = assoc_com
 
         self._store_pixel_photon_stats(pixels, photons, com_quality, verbosity)
         return pixels
