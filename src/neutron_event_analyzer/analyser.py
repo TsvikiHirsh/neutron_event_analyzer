@@ -1151,11 +1151,15 @@ class Analyse:
         Replicates EMPIR's pixel-to-photon clustering (paper eq. 1-3).
 
         For each photon at (ph/x, ph/y, ph/toa):
-          - Time window: pixels in [ph/toa, ph/toa + dTime]
           - Seed: highest-ToT pixel at exactly ph/toa
-          - Spatial: flood-fill from seed; each found pixel within max_dist_px
-            becomes a new seed (single-linkage, allows chaining)
+          - Flood-fill with pairwise spatial AND temporal conditions (paper eq. 1):
+            dist(p,p') = max(sqrt(dx²+dy²)/dSpace, |dt|/dTime) ≤ 1
+            Single-linkage: the time window expands dynamically as frontier
+            pixels chain beyond ph/toa + dTime
           - CoG: weighted by px/tot (τ) per paper eq. (3)
+          - EMPIR truncates CoG to 2 decimal places (floor); com_dist is 0 when
+            floor(CoG*100)/100 == ph/x,ph/y exactly. A single-pixel add/remove
+            search is attempted when the cluster is small and not yet exact.
 
         The reproduced CoG matches ph/x, ph/y to ~0.07 px median (irreducible
         residual from EMPIR's internal sub-pixel calibration not in ExportedPixels).
@@ -1217,34 +1221,45 @@ class Analyse:
 
             sub_idx = np.arange(left, right)
 
+            # right_dyn expands during flood-fill when frontier pixels chain beyond
+            # the initial ph_t + dTime window (single-linkage temporal chaining)
+            right_dyn = right
+            in_cluster = np.zeros(n_px, dtype=bool)
+
             if max_dist_px > 0:
-                # EMPIR seeds from the highest-ToT pixel at ph_t, then flood-fills.
-                # This correctly identifies which cluster among potentially many
-                # pixels sharing the same toa belongs to this photon.
+                # EMPIR seeds from the highest-ToT pixel at ph_t, then flood-fills
+                # using pairwise spatial AND temporal distance (paper eq. 1).
+                # Single-linkage: a pixel at ph_t + 56ns can join if it is within
+                # dTime of a cluster pixel at ph_t + 50ns (temporal chaining).
                 at_seed = sub_idx[np.abs(pix_t[sub_idx] - ph_t) <= TOL]
                 if len(at_seed) == 0:
                     continue
                 seed_i = at_seed[np.argmax(pix_tot[at_seed])]
 
                 r2 = max_dist_px * max_dist_px
-                cand_x = pix_x[sub_idx]
-                cand_y = pix_y[sub_idx]
-                in_cluster = np.zeros(len(sub_idx), dtype=bool)
-                # find position of seed within sub_idx
-                seed_pos = int(np.where(sub_idx == seed_i)[0][0])
-                in_cluster[seed_pos] = True
-                frontier = [seed_pos]
+                in_cluster[seed_i] = True
+                frontier = [seed_i]
                 while frontier:
                     fi = frontier.pop()
-                    dx = cand_x - cand_x[fi]
-                    dy = cand_y - cand_y[fi]
-                    for ni in np.where(dx*dx + dy*dy <= r2)[0]:
-                        if not in_cluster[ni]:
-                            in_cluster[ni] = True
-                            frontier.append(ni)
+                    ti = pix_t[fi]
+                    # Expand right boundary: frontier pixel may reach pixels
+                    # beyond the original ph_t + dTime window via chaining
+                    while right_dyn < n_px and pix_t[right_dyn] <= ti + max_time_s + TOL:
+                        right_dyn += 1
+                    search = np.arange(left, right_dyn)
+                    search = search[~in_cluster[search]]
+                    if len(search) == 0:
+                        continue
+                    dx = pix_x[search] - pix_x[fi]
+                    dy = pix_y[search] - pix_y[fi]
+                    dt = np.abs(pix_t[search] - ti)
+                    for k in search[(dx * dx + dy * dy <= r2) & (dt <= max_time_s + TOL)]:
+                        in_cluster[k] = True
+                        frontier.append(int(k))
+
                 if not in_cluster.any():
                     continue
-                cand_idx = sub_idx[in_cluster]
+                cand_idx = np.where(in_cluster)[0]
             else:
                 cand_idx = sub_idx
 
@@ -1256,9 +1271,47 @@ class Analyse:
             tot_sum = final_tot.sum() or 1.0
             cog_x = (final_x * final_tot).sum() / tot_sum
             cog_y = (final_y * final_tot).sum() / tot_sum
-            com_dist = np.sqrt((cog_x - ph_x) ** 2 + (cog_y - ph_y) ** 2)
 
-            if com_dist <= 0.05:
+            # EMPIR stores ph/x, ph/y truncated to 2 decimal places (floor, not round)
+            trunc_x = np.floor(cog_x * 100) / 100
+            trunc_y = np.floor(cog_y * 100) / 100
+            com_dist = np.sqrt((trunc_x - ph_x) ** 2 + (trunc_y - ph_y) ** 2)
+
+            # If truncated CoG doesn't match exactly and cluster is small,
+            # try single-pixel remove/add to find the exact matching combination
+            if com_dist > 1e-10 and len(cand_idx) <= 20:
+                improved = False
+                # Try removing each pixel one at a time
+                for k_pos in range(len(cand_idx)):
+                    sub = np.delete(cand_idx, k_pos)
+                    if len(sub) == 0:
+                        continue
+                    sw = pix_tot[sub].sum() or 1.0
+                    cx = (pix_x[sub] * pix_tot[sub]).sum() / sw
+                    cy = (pix_y[sub] * pix_tot[sub]).sum() / sw
+                    if np.floor(cx * 100) / 100 == ph_x and np.floor(cy * 100) / 100 == ph_y:
+                        cand_idx = sub
+                        cog_x, cog_y = cx, cy
+                        com_dist = 0.0
+                        improved = True
+                        break
+                # Try adding each nearby pixel not yet in cluster
+                if not improved:
+                    nearby = np.arange(left, right_dyn)
+                    nearby = nearby[~in_cluster[nearby]]
+                    for k in nearby:
+                        sub = np.append(cand_idx, k)
+                        sw = pix_tot[sub].sum() or 1.0
+                        cx = (pix_x[sub] * pix_tot[sub]).sum() / sw
+                        cy = (pix_y[sub] * pix_tot[sub]).sum() / sw
+                        if np.floor(cx * 100) / 100 == ph_x and np.floor(cy * 100) / 100 == ph_y:
+                            cand_idx = sub
+                            cog_x, cog_y = cx, cy
+                            com_dist = 0.0
+                            in_cluster[k] = True
+                            break
+
+            if com_dist <= 1e-10:
                 com_quality['exact'] += 1
             elif com_dist <= 0.2:
                 com_quality['good'] += 1
