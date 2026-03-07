@@ -1234,9 +1234,18 @@ class Analyse:
                 at_seed = sub_idx[np.abs(pix_t[sub_idx] - ph_t) <= TOL]
                 if len(at_seed) == 0:
                     continue
-                seed_i = at_seed[np.argmax(pix_tot[at_seed])]
 
                 r2 = max_dist_px * max_dist_px
+
+                # Prefer seed pixels that are spatially close to the photon.
+                # Without this, when two photons share the same timestamp the
+                # highest-ToT pixel at ph_t may belong to the other photon's
+                # spatial cluster, causing a mis-seed and wrong flood-fill.
+                dx_seed = pix_x[at_seed] - ph_x
+                dy_seed = pix_y[at_seed] - ph_y
+                near_seed = at_seed[dx_seed * dx_seed + dy_seed * dy_seed <= r2]
+                seed_pool = near_seed if len(near_seed) > 0 else at_seed
+                seed_i = seed_pool[np.argmax(pix_tot[seed_pool])]
                 in_cluster[seed_i] = True
                 frontier = [seed_i]
                 while frontier:
