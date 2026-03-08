@@ -31,7 +31,7 @@ Examples:
   nea-assoc ./data --suffix run1
 
 Settings presets: in_focus, out_of_focus, fast_neutrons, hitmap
-Association methods: simple (default), kdtree, window, mystic, ml, empir
+Association methods: empir (default), simple, kdtree, window, mystic, ml
 
 Run 'nea-assoc --advanced --help' to see all options.
 """
@@ -112,8 +112,8 @@ def create_assoc_parser():
         '--method', '-m',
         type=str,
         choices=['simple', 'kdtree', 'window', 'mystic', 'ml', 'empir'],
-        default='simple',
-        help='Association method (default: simple)',
+        default='empir',
+        help='Association method (default: empir)',
     )
     parser.add_argument(
         '--suffix',
@@ -193,6 +193,13 @@ def create_assoc_parser():
         type=float,
         metavar='NS',
         help='Max time window for photon-event association (nanoseconds)',
+    ))
+    _mark_advanced(parser.add_argument(
+        '--min-pixels',
+        type=int,
+        metavar='N',
+        default=None,
+        help='Minimum pixels per photon for empir method (default: from settings or 1)',
     ))
     _mark_advanced(parser.add_argument(
         '--relax',
@@ -310,6 +317,8 @@ def main_assoc():
         assoc_kwargs['photon_dSpace_px'] = args.photon_dspace
     if args.max_time is not None:
         assoc_kwargs['max_time_ns'] = args.max_time
+    if args.min_pixels is not None:
+        assoc_kwargs['min_pixels'] = args.min_pixels
 
     try:
         analyser.associate(**assoc_kwargs)

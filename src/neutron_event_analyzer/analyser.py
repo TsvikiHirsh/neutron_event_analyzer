@@ -135,6 +135,8 @@ class Analyse:
             defaults['pixel_max_dist_px'] = float(p2p['dSpace'])
         if 'dTime' in p2p:
             defaults['pixel_max_time_ns'] = float(p2p['dTime']) * 1e9
+        if 'nPxMin' in p2p:
+            defaults['min_pixels'] = int(p2p['nPxMin'])
         p2e = self.settings.get('photon2event', {})
         if 'dSpace_px' in p2e:
             defaults['photon_dSpace_px'] = float(p2e['dSpace_px'])
@@ -428,7 +430,8 @@ class Analyse:
 
     def associate(self, pixel_max_dist_px=None, pixel_max_time_ns=None,
                   photon_dSpace_px=None, max_time_ns=None,
-                  verbosity=None, method='simple', relax=1.0, suffix=None):
+                  min_pixels=None,
+                  verbosity=None, method='empir', relax=10, suffix=None):
         """
         Perform full association: pixels -> photons -> events (or subsets).
 
@@ -453,7 +456,8 @@ class Analyse:
                 - 'window': Symmetric sliding time-window KDTree.
                 - 'mystic': Constrained optimization (requires mystic package).
                 - 'ml': Machine learning (requires trained model; falls back to 'simple').
-            relax (float): Scale all parameters by this factor (> 1 = more relaxed).
+            relax (float): For empir: search-window multiplier (default 10 = 10×dSpace/dTime).
+                           For other methods: scales pixel/photon parameters directly.
             suffix (str): Optional suffix for output filename, e.g. 'run1' produces
                           'associated_data_run1.csv'.
 
@@ -472,9 +476,14 @@ class Analyse:
             photon_dSpace_px = defaults.get('photon_dSpace_px', 50.0)
         if max_time_ns is None:
             max_time_ns = defaults.get('max_time_ns', 500)
+        if min_pixels is None:
+            min_pixels = defaults.get('min_pixels', 1)
 
-        pixel_max_dist_px *= relax
-        pixel_max_time_ns *= relax
+        # For empir, relax is the search-window multiplier passed directly to the
+        # method (defaults to 10); pixel params are not pre-scaled here.
+        if method != 'empir':
+            pixel_max_dist_px *= relax
+            pixel_max_time_ns *= relax
         photon_dSpace_px *= relax
         max_time_ns *= relax
 
@@ -493,7 +502,8 @@ class Analyse:
                 print("3-tier: Pixels -> Photons -> Events")
 
             pixels_assoc = self._run_pixel_photon_assoc(
-                method, pixel_max_dist_px, pixel_max_time_ns, verbosity)
+                method, pixel_max_dist_px, pixel_max_time_ns, verbosity,
+                min_pixels=min_pixels, relax=relax)
 
             self._run_photon_event_assoc(
                 method, photon_dSpace_px, max_time_ns, verbosity)
@@ -507,7 +517,8 @@ class Analyse:
             if verbosity >= 2:
                 print("2-tier: Pixels -> Photons")
             pixels_assoc = self._run_pixel_photon_assoc(
-                method, pixel_max_dist_px, pixel_max_time_ns, verbosity)
+                method, pixel_max_dist_px, pixel_max_time_ns, verbosity,
+                min_pixels=min_pixels, relax=relax)
             self.associated_df = self._standardize_column_names(pixels_assoc, verbosity)
 
         elif has_ph and has_ev:
@@ -539,7 +550,8 @@ class Analyse:
         except ImportError:
             return self.associated_df
 
-    def _run_pixel_photon_assoc(self, method, max_dist_px, max_time_ns, verbosity):
+    def _run_pixel_photon_assoc(self, method, max_dist_px, max_time_ns, verbosity,
+                                min_pixels=1, relax=1.0):
         if method == 'kdtree':
             return self._associate_pixels_to_photons_kdtree(
                 self.pixels_df, self.photons_df, max_dist_px, max_time_ns, verbosity)
@@ -551,7 +563,8 @@ class Analyse:
                 self.pixels_df, self.photons_df, max_dist_px, max_time_ns, verbosity=verbosity)
         elif method == 'empir':
             return self._associate_pixels_to_photons_empir(
-                self.pixels_df, self.photons_df, max_dist_px, max_time_ns, verbosity)
+                self.pixels_df, self.photons_df, max_dist_px, max_time_ns,
+                min_pixels=min_pixels, relax=relax, verbosity=verbosity)
         else:
             return self._associate_pixels_to_photons_simple(
                 self.pixels_df, self.photons_df, max_dist_px, max_time_ns, verbosity)
@@ -1142,32 +1155,37 @@ class Analyse:
         return pixels
 
     def _associate_pixels_to_photons_empir(self, pixels_df, photons_df,
-                                            max_dist_px=2.0, max_time_ns=50, verbosity=0):
+                                            max_dist_px=2.0, max_time_ns=50,
+                                            min_pixels=1, relax=10, verbosity=0):
         """
         Associate pixels to photons via greedy best-subset optimisation.
 
-        For each photon (ordered by toa), finds the subset of unclaimed pixels
-        within (max_dist_px, max_time_ns) of the photon whose ToT-weighted CoG
-        minimises distance to (ph/x, ph/y).  Claimed pixels are excluded from
-        all subsequent photon searches.
+        For each photon (ordered by toa), searches a window of
+        relax × max_time_ns (time) and relax × max_dist_px (spatial) around
+        (ph/x, ph/y, ph/toa) for unclaimed pixel candidates.
+        All 2^N − 1 non-empty subsets with at least min_pixels members are
+        evaluated via vectorised bit-matrix arithmetic; the subset whose
+        ToT-weighted CoG (truncated to 2 dp, matching EMPIR) is closest to
+        (ph/x, ph/y) is claimed. Photons with no qualifying subset are skipped.
 
-        Candidate pixels per photon are capped at MAX_CAND (nearest by spatial
-        distance); all 2^N − 1 non-empty subsets are evaluated via vectorised
-        bit-matrix arithmetic.
+        Args:
+            relax: Search-window multiplier (default 10, i.e. 10 × dSpace/dTime).
+                   Pass via nea-assoc --relax to override.
         """
         MAX_CAND = 15   # 2^15 − 1 = 32 767 subsets, ~2 MB bit-matrix
+
         if pixels_df is None or photons_df is None or len(pixels_df) == 0 or len(photons_df) == 0:
             return pixels_df
 
-        pixels = pixels_df.copy()
+        pixels  = pixels_df.copy()
         photons = photons_df.copy()
         pixels['assoc_photon_id'] = np.nan
-        pixels['assoc_phot_x'] = np.nan
-        pixels['assoc_phot_y'] = np.nan
-        pixels['assoc_phot_t'] = np.nan
-        pixels['pixel_com_dist'] = np.nan
+        pixels['assoc_phot_x']    = np.nan
+        pixels['assoc_phot_y']    = np.nan
+        pixels['assoc_phot_t']    = np.nan
+        pixels['pixel_com_dist']  = np.nan
 
-        pixels = pixels.sort_values('t').reset_index(drop=True)
+        pixels  = pixels.sort_values('t').reset_index(drop=True)
         photons = photons.sort_values('t').reset_index(drop=True)
         photons['photon_id'] = photons.index + 1
 
@@ -1176,7 +1194,9 @@ class Analyse:
         pix_y   = pixels['y'].to_numpy()
         pix_tot = pixels['tot'].to_numpy() if 'tot' in pixels.columns else np.ones(len(pixels))
 
-        max_time_s = max_time_ns / 1e9
+        base_time_s   = max_time_ns / 1e9
+        search_time_s = base_time_s * relax
+        search_dist   = max_dist_px * relax
         TOL = 1e-12   # guard against float round-trip from CSV
 
         n_px = len(pixels)
@@ -1196,28 +1216,29 @@ class Analyse:
             ph_y  = phot['y']
             ph_id = phot['photon_id']
 
-            # Time window [ph_t, ph_t + dTime]
+            # Time window: [ph_t, ph_t + search_time_s]
             l = int(np.searchsorted(pix_t, ph_t - TOL))
-            r = int(np.searchsorted(pix_t, ph_t + max_time_s + TOL, side='right'))
+            r = int(np.searchsorted(pix_t, ph_t + search_time_s + TOL, side='right'))
             if r == l:
+                com_quality['failed'] += 1
                 continue
 
             # Unclaimed candidates within time window
             cands = np.arange(l, r)
             cands = cands[~claimed[cands]]
             if len(cands) == 0:
+                com_quality['failed'] += 1
                 continue
 
-            # Spatial filter: within max_dist_px of photon position
-            if max_dist_px > 0:
-                dx = pix_x[cands] - ph_x
-                dy = pix_y[cands] - ph_y
-                cands = cands[dx * dx + dy * dy <= max_dist_px * max_dist_px]
-
+            # Spatial filter: within search_dist of photon position
+            dx = pix_x[cands] - ph_x
+            dy = pix_y[cands] - ph_y
+            cands = cands[dx * dx + dy * dy <= search_dist * search_dist]
             if len(cands) == 0:
+                com_quality['failed'] += 1
                 continue
 
-            # Cap to MAX_CAND nearest candidates
+            # Cap to MAX_CAND nearest candidates (keep closest by spatial dist)
             if len(cands) > MAX_CAND:
                 dx = pix_x[cands] - ph_x
                 dy = pix_y[cands] - ph_y
@@ -1225,12 +1246,20 @@ class Analyse:
 
             # Exhaustive subset search via vectorised bit-matrix
             n_c  = len(cands)
-            tots = pix_tot[cands]
-            wx   = pix_x[cands] * tots
-            wy   = pix_y[cands] * tots
+            tots = pix_tot[cands].astype(np.float32)
+            wx   = (pix_x[cands] * tots).astype(np.float32)
+            wy   = (pix_y[cands] * tots).astype(np.float32)
 
             masks    = np.arange(1, 1 << n_c, dtype=np.int32)
             bits     = ((masks[:, None] >> np.arange(n_c, dtype=np.int32)) & 1).astype(np.float32)
+            counts   = bits.sum(axis=1)           # number of pixels in each subset
+
+            # Only consider subsets with at least min_pixels members
+            valid = counts >= min_pixels
+            if not valid.any():
+                com_quality['failed'] += 1
+                continue
+
             tot_sums = bits @ tots
             tot_safe = np.where(tot_sums == 0, 1.0, tot_sums)
             cog_xs   = (bits @ wx) / tot_safe
@@ -1241,8 +1270,10 @@ class Analyse:
             trunc_ys = np.floor(cog_ys * 100) / 100
             sq_dists = (trunc_xs - ph_x) ** 2 + (trunc_ys - ph_y) ** 2
 
-            best     = int(np.argmin(sq_dists))
-            com_dist = float(np.sqrt(sq_dists[best]))
+            # Pick best subset among those satisfying min_pixels
+            sq_dists_v = np.where(valid, sq_dists, np.inf)
+            best     = int(np.argmin(sq_dists_v))
+            com_dist = float(np.sqrt(sq_dists_v[best]))
             cand_idx = cands[bits[best].astype(bool)]
 
             if com_dist <= 1e-10:
