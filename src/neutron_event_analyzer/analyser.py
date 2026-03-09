@@ -833,7 +833,6 @@ class Analyse:
         Associate photons to events using a forward time-window with conflict resolution.
 
         All window boundaries are pre-computed with np.searchsorted (vectorised).
-        A spatial bounding-box pre-filter avoids sqrt for distant photons.
         Output is collected in pre-allocated numpy arrays and written back in one
         DataFrame.assign() call — eliminating the per-row loc[] bottleneck.
         Conflict resolution (lowest CoM distance wins) is done inline in a single
@@ -885,15 +884,13 @@ class Analyse:
 
             sub = np.arange(lo, hi)
 
-            # Bbox pre-filter: cheap abs check before computing sqrt
-            dx = p_x[sub] - ex
-            dy = p_y[sub] - ey
-            bbox = (np.abs(dx) <= dSpace_px) & (np.abs(dy) <= dSpace_px)
-            sub = sub[bbox];  dx = dx[bbox];  dy = dy[bbox]
-            if len(sub) < en:
-                continue
-
-            # Exact distances only for bbox survivors
+            # Compute distances to all photons in the time window.
+            # No spatial pre-filter here: the original algorithm selects the n
+            # nearest photons from the full window (regardless of dSpace) and
+            # then accepts only if the group CoM is within dSpace.  Preserving
+            # this semantics keeps results identical to the old implementation.
+            dx    = p_x[sub] - ex
+            dy    = p_y[sub] - ey
             dists = np.sqrt(dx * dx + dy * dy)
             order = np.argsort(dists)[:en]
             sel   = sub[order]
@@ -929,34 +926,35 @@ class Analyse:
         return photons
 
     def _store_photon_event_stats(self, photons, events, dSpace_px, verbosity):
-        """Compute and store photon-event association statistics."""
+        """Compute and store photon-event association statistics.
+
+        Uses groupby instead of a per-event boolean-mask loop, which was the
+        dominant bottleneck (O(n_events) pandas __getitem__ calls).
+        """
         matched_photons = photons['assoc_event_id'].notna().sum()
-        total_photons = len(photons)
-        matched_ev_ids = photons[photons['assoc_event_id'].notna()]['assoc_event_id'].unique()
-        matched_events = len(matched_ev_ids)
-        total_events = len(events)
+        total_photons   = len(photons)
+        total_events    = len(events)
+
+        matched = photons[photons['assoc_event_id'].notna()]
+        matched_events  = int(matched['assoc_event_id'].nunique())
 
         quality = {'exact_n': 0, 'n_mismatch': 0, 'exact_com': 0,
                    'good_com': 0, 'acceptable_com': 0, 'poor_com': 0}
-        for eid in matched_ev_ids:
-            ep = photons[photons['assoc_event_id'] == eid]
-            actual_n = len(ep)
-            pred_n = int(ep.iloc[0]['assoc_n'])
-            if actual_n == pred_n:
-                quality['exact_n'] += 1
-            else:
-                quality['n_mismatch'] += 1
-            if 'assoc_com_dist' in ep.columns:
-                com_dist = ep.iloc[0]['assoc_com_dist']
-                sr = dSpace_px if dSpace_px != np.inf else 50.0
-                if com_dist <= 0.1:
-                    quality['exact_com'] += 1
-                elif com_dist <= sr * 0.3:
-                    quality['good_com'] += 1
-                elif com_dist <= sr * 0.5:
-                    quality['acceptable_com'] += 1
-                else:
-                    quality['poor_com'] += 1
+
+        if len(matched) > 0:
+            grp      = matched.groupby('assoc_event_id', sort=False)
+            actual_n = grp.size()
+            pred_n   = grp['assoc_n'].first().astype(int)
+            quality['exact_n']    = int((actual_n == pred_n).sum())
+            quality['n_mismatch'] = int((actual_n != pred_n).sum())
+
+            if 'assoc_com_dist' in matched.columns:
+                sr        = dSpace_px if dSpace_px != np.inf else 50.0
+                com_dists = grp['assoc_com_dist'].first()
+                quality['exact_com']      = int((com_dists <= 0.1).sum())
+                quality['good_com']       = int(((com_dists > 0.1)      & (com_dists <= sr * 0.3)).sum())
+                quality['acceptable_com'] = int(((com_dists > sr * 0.3) & (com_dists <= sr * 0.5)).sum())
+                quality['poor_com']       = int((com_dists > sr * 0.5).sum())
 
         self.last_photon_event_stats = {
             'matched_photons': int(matched_photons),
