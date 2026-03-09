@@ -42,7 +42,11 @@
       "Bash(/root/.local/bin/micromamba run -n base pip install pdfminer.six -q)",
       "Bash(/root/.local/bin/micromamba run -n base python3 -c \":*)",
       "Read(//work/nuclear/PTB/PTB2024/**)",
-      "Read(//work/nuclear/PTB/**)"
+      "Read(//work/nuclear/PTB/**)",
+      "Bash(/root/.local/bin/micromamba run -n base python3 notebooks/benchmark_association.py)",
+      "Bash(/root/.local/bin/micromamba run -n base python3 -c \"import neutron_event_analyzer; print\\(neutron_event_analyzer.__file__\\)\")",
+      "Bash(/root/.local/bin/micromamba run -n base pip install -e . -q)",
+      "Bash(/root/.local/bin/micromamba run -n base python3 notebooks/benchmark_photon_event.py)"
     ]
   }
 }
