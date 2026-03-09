@@ -13,6 +13,15 @@ import os
 import json
 from pathlib import Path
 
+# The EMPIR pixel-photon bit-matrix operations are small (<<1000 elements).
+# NumPy's BLAS/OpenBLAS spawns worker threads that spend more time waiting
+# on locks than doing useful work.  Force single-threaded numpy to eliminate
+# the overhead (~20s saved on a typical PTB dataset).
+os.environ.setdefault('OMP_NUM_THREADS', '1')
+os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
+os.environ.setdefault('MKL_NUM_THREADS', '1')
+os.environ.setdefault('NUMEXPR_NUM_THREADS', '1')
+
 
 # =============================================================================
 # Simple / Advanced help toggle

@@ -1237,6 +1237,15 @@ class Analyse:
         if pixels_df is None or photons_df is None or len(pixels_df) == 0 or len(photons_df) == 0:
             return pixels_df
 
+        # The bit-matrix ops below are small (≤32767 rows × ≤15 cols).
+        # BLAS/OpenBLAS spawns worker threads whose lock-wait overhead exceeds
+        # the compute gain.  Limit to 1 thread for the duration of this method.
+        try:
+            import threadpoolctl as _tpc
+            _thread_limiter = _tpc.threadpool_limits(limits=1)
+        except ImportError:
+            _thread_limiter = None
+
         pixels  = pixels_df.copy()
         photons = photons_df.copy()
         pixels['assoc_photon_id'] = np.nan
@@ -1398,6 +1407,9 @@ class Analyse:
 
         if verbosity >= 1:
             print()  # newline after progress dots
+
+        if _thread_limiter is not None:
+            _thread_limiter.__exit__(None, None, None)
 
         pixels['assoc_photon_id'] = assoc_id
         pixels['assoc_phot_x']    = assoc_x
