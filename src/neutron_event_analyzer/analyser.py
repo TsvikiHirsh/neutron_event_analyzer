@@ -873,7 +873,7 @@ class Analyse:
 
         # Single pass: for each event, find photons, resolve conflicts inline
         for i in tqdm(range(len(events)), desc="Associating photons to events",
-                      disable=(verbosity == 0)):
+                      disable=(verbosity == 0), mininterval=1.0):
             lo = int(left_arr[i]);  hi = int(right_arr[i])
             en = int(e_n[i])
             if hi - lo < en:
@@ -1273,12 +1273,19 @@ class Analyse:
         assoc_com = np.full(n_px, np.nan)
         claimed   = np.zeros(n_px, dtype=bool)
 
-        for _, phot in tqdm(photons.iterrows(), total=len(photons),
-                            desc="Associating pixels to photons", disable=(verbosity == 0)):
-            ph_t  = phot['t']
-            ph_x  = phot['x']
-            ph_y  = phot['y']
-            ph_id = phot['photon_id']
+        # Pre-extract photon columns as numpy arrays — avoids iterrows overhead
+        ph_t_arr  = photons['t'].to_numpy()
+        ph_x_arr  = photons['x'].to_numpy()
+        ph_y_arr  = photons['y'].to_numpy()
+        ph_id_arr = photons['photon_id'].to_numpy()
+        n_photons = len(photons)
+
+        for j in tqdm(range(n_photons), desc="Associating pixels to photons",
+                      disable=(verbosity == 0), mininterval=1.0):
+            ph_t  = ph_t_arr[j]
+            ph_x  = ph_x_arr[j]
+            ph_y  = ph_y_arr[j]
+            ph_id = ph_id_arr[j]
 
             best_com_dist = np.inf
             best_cand_idx = None
