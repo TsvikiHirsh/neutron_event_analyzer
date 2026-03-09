@@ -48,7 +48,9 @@
       "Bash(/root/.local/bin/micromamba run -n base pip install -e . -q)",
       "Bash(/root/.local/bin/micromamba run -n base python3 notebooks/benchmark_photon_event.py)",
       "Bash(/root/.local/bin/micromamba run:*)",
-      "Bash(/root/micromamba/bin/python3.13 -c \":*)"
+      "Bash(/root/micromamba/bin/python3.13 -c \":*)",
+      "Bash(/root/micromamba/bin/python3.13 -c \"import neutron_event_analyzer; print\\(neutron_event_analyzer.__file__\\)\")",
+      "Bash(cp /work/nuclear/neutron_event_analyzer/src/neutron_event_analyzer/analyser.py /root/micromamba/lib/python3.13/site-packages/neutron_event_analyzer/analyser.py)"
     ]
   }
 }

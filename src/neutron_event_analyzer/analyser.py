@@ -872,8 +872,15 @@ class Analyse:
         out_com = np.full(n_ph, np.inf)   # inf sentinel for conflict resolution
 
         # Single pass: for each event, find photons, resolve conflicts inline
-        for i in tqdm(range(len(events)), desc="Associating photons to events",
-                      disable=(verbosity == 0), mininterval=1.0):
+        _n_ev = len(events)
+        _pe = max(1, _n_ev // 20)
+        if verbosity >= 1:
+            print(f"  Associating photons to events ({_n_ev:,})  ", end='', flush=True)
+
+        for i in range(_n_ev):
+            if verbosity >= 1 and i % _pe == 0:
+                print('.', end='', flush=True)
+
             lo = int(left_arr[i]);  hi = int(right_arr[i])
             en = int(e_n[i])
             if hi - lo < en:
@@ -921,6 +928,9 @@ class Analyse:
             time_diff_ns    = np.nan,
             spatial_diff_px = np.nan,
         )
+
+        if verbosity >= 1:
+            print()  # newline after progress dots
 
         self._store_photon_event_stats(photons, events, dSpace_px, verbosity)
         return photons
@@ -1280,8 +1290,17 @@ class Analyse:
         ph_id_arr = photons['photon_id'].to_numpy()
         n_photons = len(photons)
 
-        for j in tqdm(range(n_photons), desc="Associating pixels to photons",
-                      disable=(verbosity == 0), mininterval=1.0):
+        # Use a simple print-based progress instead of tqdm: the tqdm monitor
+        # thread causes GIL contention with numpy that takes longer than the
+        # actual computation.
+        _print_every = max(1, n_photons // 20)  # ~5% steps
+        if verbosity >= 1:
+            print(f"  Associating pixels to photons ({n_photons:,})  ", end='', flush=True)
+
+        for j in range(n_photons):
+            if verbosity >= 1 and j % _print_every == 0:
+                print('.', end='', flush=True)
+
             ph_t  = ph_t_arr[j]
             ph_x  = ph_x_arr[j]
             ph_y  = ph_y_arr[j]
@@ -1376,6 +1395,9 @@ class Analyse:
             assoc_y[best_cand_idx]   = ph_y
             assoc_t[best_cand_idx]   = ph_t
             assoc_com[best_cand_idx] = best_com_dist
+
+        if verbosity >= 1:
+            print()  # newline after progress dots
 
         pixels['assoc_photon_id'] = assoc_id
         pixels['assoc_phot_x']    = assoc_x
