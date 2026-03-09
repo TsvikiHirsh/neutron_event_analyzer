@@ -53,7 +53,9 @@
       "Bash(cp /work/nuclear/neutron_event_analyzer/src/neutron_event_analyzer/analyser.py /root/micromamba/lib/python3.13/site-packages/neutron_event_analyzer/analyser.py)",
       "Bash(/root/micromamba/bin/python3.13 -:*)",
       "Bash(/root/micromamba/bin/python3.13 -c \"import threadpoolctl; print\\(''threadpoolctl available:'', threadpoolctl.__version__\\)\")",
-      "Bash(time /root/micromamba/bin/nea-assoc /work/nuclear/PTB/data/PTB2024/out_of_focus --settings /work/nuclear/PTB/data/PTB2024/parameterSettings_out_of_focus.json -q)"
+      "Bash(time /root/micromamba/bin/nea-assoc /work/nuclear/PTB/data/PTB2024/out_of_focus --settings /work/nuclear/PTB/data/PTB2024/parameterSettings_out_of_focus.json -q)",
+      "Bash(/root/micromamba/bin/python3.13 -m cProfile -o /tmp/nea_final.out /root/micromamba/bin/nea-assoc /work/nuclear/PTB/data/PTB2024/out_of_focus --settings /work/nuclear/PTB/data/PTB2024/parameterSettings_out_of_focus.json -q)",
+      "Bash(__NEW_LINE_675ce8d4c2afaa81__ /root/micromamba/bin/python3.13 -c \":*)"
     ]
   }
 }

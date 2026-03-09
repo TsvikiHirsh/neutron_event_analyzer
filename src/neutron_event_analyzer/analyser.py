@@ -1238,13 +1238,15 @@ class Analyse:
             return pixels_df
 
         # The bit-matrix ops below are small (≤32767 rows × ≤15 cols).
-        # BLAS/OpenBLAS spawns worker threads whose lock-wait overhead exceeds
-        # the compute gain.  Limit to 1 thread for the duration of this method.
+        # BLAS/OpenBLAS worker threads spend more time waiting on locks than
+        # doing useful work.  Permanently set to 1 thread — no restore, because
+        # restoring causes OpenBLAS to re-spin threads (~9s overhead).
+        # nea-assoc is a short-lived CLI process so permanent limiting is fine.
         try:
             import threadpoolctl as _tpc
-            _thread_limiter = _tpc.threadpool_limits(limits=1)
+            _tpc.threadpool_limits(limits=1)
         except ImportError:
-            _thread_limiter = None
+            pass
 
         pixels  = pixels_df.copy()
         photons = photons_df.copy()
@@ -1407,9 +1409,6 @@ class Analyse:
 
         if verbosity >= 1:
             print()  # newline after progress dots
-
-        if _thread_limiter is not None:
-            _thread_limiter.__exit__(None, None, None)
 
         pixels['assoc_photon_id'] = assoc_id
         pixels['assoc_phot_x']    = assoc_x
