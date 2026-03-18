@@ -395,7 +395,7 @@ def main_assoc():
                 suffix=args.suffix or '',
                 verbose=verbosity >= 1,
             )
-            stem = f"combined_{args.suffix}" if args.suffix else "combined"
+            stem = f"associated_data_{args.suffix}" if args.suffix else "associated_data"
             ext  = '.parquet' if args.format == 'parquet' else '.csv'
             out_path = Path(args.output_dir) if args.output_dir else Path(args.data) / 'AssociatedResults'
             out_path.mkdir(parents=True, exist_ok=True)
@@ -405,7 +405,7 @@ def main_assoc():
             else:
                 combined.to_csv(out_file, index=False)
             if verbosity >= 1:
-                print(f"Combined saved → {out_file}  ({len(combined):,} rows × {len(combined.columns)} cols)")
+                print(f"Saved → {out_file}  ({len(combined):,} rows × {len(combined.columns)} cols)")
         except Exception as e:
             print(f"Error during sim merge: {e}")
             if verbosity >= 2:

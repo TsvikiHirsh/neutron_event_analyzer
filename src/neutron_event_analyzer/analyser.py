@@ -2495,10 +2495,15 @@ def build_combined(run_dir, archive, suffix='', sim_cols=None, verbose=False):
         n_total   = len(combined)
         n_matched = int(combined['sim_id'].notna().sum()) if 'sim_id' in combined.columns else 0
         print(f"  Step 2 match rate (assoc→trace): {n_matched/n_total:.1%}  ({n_matched:,} / {n_total:,})")
-        if verbose and 'px/x' in combined.columns and 'pixel_x' in trace_with_sim.columns:
-            # Sanity check: pixel coordinates should agree after join
+        if 'px/x' in combined.columns and 'pixel_x' in trace_with_sim.columns:
             px_match = (combined['px/x'].astype(int) ==
                         trace_with_sim['pixel_x'].astype(int).iloc[:len(combined)].values).mean()
             print(f"  Coordinate sanity (px/x == pixel_x): {px_match:.1%}")
+
+    # ── rename sim-derived columns to sim/ prefix ─────────────────────────────
+    _sim_src = set(_DEFAULT_SIM_COLS) | {'neutron_id', 'pulse_id', 'pulse_time_ns'}
+    _rename = {c: f'sim/{c}' for c in combined.columns if c in _sim_src}
+    _rename['sim_id'] = 'sim/id'
+    combined = combined.rename(columns=_rename)
 
     return combined
