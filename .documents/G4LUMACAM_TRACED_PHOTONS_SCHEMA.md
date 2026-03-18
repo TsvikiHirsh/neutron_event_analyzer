@@ -28,36 +28,19 @@ between AssociatedResults and SimPhotons is a stable integer ID that flows
 from the Geant4 truth table all the way through to the per-pixel rows in
 AssociatedResults.
 
-### Why the current `id` column is insufficient
+### Join key
 
-| Table | `id` value (example) | Meaning |
-|---|---|---|
-| SimPhotons | `7737` | Geant4 **track ID** — assigned by the G4 kernel |
-| TracedPhotons | `1044` | G4LumaCam **internal cluster index** — re-numbered sequentially |
-
-These are different numbering schemes.  A join on `(id, pulse_id)` across the
-two tables will silently produce all-NaN rows.
-
----
-
-## Required change: add `sim/id` to TracedPhotons and tpx3
-
-### What `sim/id` is
-
-`sim/id` is the Geant4 track ID of the SimPhoton that produced a given set of
-detector pixels.  It equals `SimPhotons.id` for the corresponding row.
+`TracedPhotons.id` is the Geant4 track ID of the SimPhoton that produced the
+pixel — it is identical to `SimPhotons.id`.
 
 ```
-TracedPhotons.sim_id  ==  SimPhotons.id
-TracedPhotons.pulse_id  ==  SimPhotons.pulse_id
+TracedPhotons.id       ==  SimPhotons.id
+TracedPhotons.pulse_id ==  SimPhotons.pulse_id
 ```
 
-Together `(sim_id, pulse_id)` form a globally unique key across all files and
-pulses, identical to the key already used in SimPhotons.
-
-> **Note on naming:** the column is called `sim_id` in CSV files (underscore,
-> no slash) because `/` is not a safe CSV column name character.  The analysis
-> code refers to it as `sim/id` after loading.
+Together `(id, pulse_id)` form a globally unique key across all files and
+pulses.  No new column is required; `build_combined` internally aliases `id`
+to `sim_id` for clarity but the CSV files do not need to change.
 
 ---
 
@@ -73,37 +56,10 @@ batch, `N` is the file index).
 | `toa2` | `float64` | ns | Time of arrival of this pixel hit on the detector |
 | `time_diff` | `float64` | ns | Time-over-threshold (ToT) — energy proxy |
 | `photon_count` | `int` | — | Number of photons contributing to this pixel (usually 1) |
-| `id` | `int` | — | G4LumaCam internal cluster index — **keep for backward compat** |
-| **`sim_id`** | **`int`** | — | **NEW — Geant4 track ID from SimPhotons (`SimPhotons.id`)** |
+| `id` | `int` | — | Geant4 track ID — equals `SimPhotons.id`, the primary join key |
 | `neutron_id` | `int` | — | Neutron event index within the pulse |
 | `pulse_id` | `int` | — | Pulse (trigger) index, shared with SimPhotons |
 | `pulse_time_ns` | `float64` | ns | Absolute pulse start time |
-
-### How to populate `sim_id`
-
-When G4LumaCam traces an optical photon through the lens model to the
-detector, it already knows which Geant4 track produced that photon.  At the
-point where a pixel hit is registered, store `track->GetTrackID()` (or its
-Python equivalent from the simulation bookkeeping) as `sim_id`.
-
-```python
-# Pseudocode inside G4LumaCam pixel-hit recording
-pixel_hit = {
-    "pixel_x":      hit.pixel_x,
-    "pixel_y":      hit.pixel_y,
-    "toa2":         hit.toa_ns,
-    "time_diff":    hit.tot_ns,
-    "photon_count": 1,
-    "id":           cluster_index,          # existing internal index
-    "sim_id":       photon.geant4_track_id, # ← NEW: SimPhotons.id
-    "neutron_id":   photon.neutron_id,
-    "pulse_id":     photon.pulse_id,
-    "pulse_time_ns": pulse.start_time_ns,
-}
-```
-
-`sim_id` must be set **before** any re-numbering or de-duplication steps so
-that the value is always traceable back to the original Geant4 track.
 
 ---
 

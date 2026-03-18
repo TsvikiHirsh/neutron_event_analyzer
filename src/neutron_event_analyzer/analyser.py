@@ -2448,10 +2448,8 @@ def build_combined(run_dir, archive, suffix='', sim_cols=None, verbose=False):
         print(f"  SimPhotons    rows loaded : {len(sim):,}")
         print(f"  AssociatedResults rows    : {len(assoc):,}")
 
-    # ── backwards compat: sim_id fallback ─────────────────────────────────────
+    # TracedPhotons.id == SimPhotons.id; alias to sim_id for clarity
     if 'sim_id' not in trace.columns:
-        if verbose:
-            print("  Warning: TracedPhotons has no sim_id column — using 'id' as fallback")
         trace = trace.rename(columns={'id': 'sim_id'})
 
     # ── step 1: AssociatedResults → TracedPhotons (exact MultiIndex join) ─────
