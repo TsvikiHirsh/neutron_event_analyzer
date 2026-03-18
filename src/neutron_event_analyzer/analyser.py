@@ -2366,52 +2366,51 @@ def build_combined(run_dir, archive, suffix='', sim_cols=None, verbose=False):
 
     Join strategy
     -------------
-    Step 1  AssociatedResults → TracedPhotons
-            Exact join on integer pixel coordinates (pixel_x, pixel_y).
-            No time comparison; O(1) per row via MultiIndex lookup.
-    Step 2  TracedPhotons → SimPhotons
-            Exact merge on (sim_id, pulse_id).
-            sim_id == SimPhotons.id (Geant4 track ID).
+    Step 1  TracedPhotons → SimPhotons
+            traced_sim_data_N.csv row has ``id`` = the matching row's ``id``
+            in sim_data_N.csv (files are paired by index N).
+            A ``_file_id`` tag is added to both sides so IDs from different
+            files never collide.  Join key: (_file_id, id).
+
+    Step 2  AssociatedResults → TracedPhotons
+            TracedPhotons rows are 1-to-1 with ExportedPixels rows in the
+            same order; AssociatedResults preserves that order.
+            Join key: pandas row index (no coordinates or time needed).
 
     Parameters
     ----------
     run_dir : str or Path
-        Directory that contains AssociatedResults/, e.g. the EMPIR output root.
+        Directory that contains AssociatedResults/, the EMPIR output root.
     archive : str or Path
         Root directory that contains TracedPhotons/ and SimPhotons/.
     suffix : str, optional
         Suffix appended to the association file name:
-        ``associated_data_<suffix>.csv``.  Pass the same value used in
-        ``Analyse.associate(suffix=...)``.  Empty string → ``associated_data.csv``.
+        ``associated_data_<suffix>.csv``.  Empty string → ``associated_data.csv``.
     sim_cols : list of str, optional
-        SimPhotons columns to carry into the output.  Defaults to all columns
-        in _DEFAULT_SIM_COLS.
+        SimPhotons columns to carry into the output.
+        Defaults to all columns in _DEFAULT_SIM_COLS.
     verbose : bool, optional
-        Print match-rate diagnostics.
+        Print row counts and match-rate diagnostics.
 
     Returns
     -------
     pd.DataFrame
-        Pixel-level DataFrame with px/*, ph/*, ev/* columns plus sim_id,
-        neutron_id, pulse_id from TracedPhotons and the requested SimPhotons
-        truth columns.
+        Pixel-level DataFrame. All AssociatedResults columns are present
+        (px/*, ph/*, ev/*) plus TracedPhotons metadata (sim_id, neutron_id,
+        pulse_id) and the requested SimPhotons truth columns.
 
     Raises
     ------
     FileNotFoundError
         If AssociatedResults CSV, TracedPhotons/ or SimPhotons/ are missing.
-
-    Notes
-    -----
-    TracedPhotons must contain a ``sim_id`` column equal to ``SimPhotons.id``
-    (the Geant4 track ID).  Files produced before this column was added fall
-    back gracefully to the ``id`` column with a warning.
+    ValueError
+        If the number of traced_sim_data_*.csv and sim_data_*.csv files differ.
     """
     run_dir  = Path(run_dir)
     archive  = Path(archive)
     sim_cols = list(sim_cols) if sim_cols is not None else list(_DEFAULT_SIM_COLS)
 
-    # ── locate input files ────────────────────────────────────────────────────
+    # ── locate files ──────────────────────────────────────────────────────────
     assoc_fname = f"associated_data_{suffix}.csv" if suffix else "associated_data.csv"
     assoc_path  = run_dir / 'AssociatedResults' / assoc_fname
     if not assoc_path.exists():
@@ -2430,75 +2429,72 @@ def build_combined(run_dir, archive, suffix='', sim_cols=None, verbose=False):
         raise FileNotFoundError(f"No traced_sim_data_*.csv files in {trace_dir}")
     if not sim_files:
         raise FileNotFoundError(f"No sim_data_*.csv files in {sim_dir}")
+    if len(trace_files) != len(sim_files):
+        raise ValueError(
+            f"File count mismatch: {len(trace_files)} TracedPhotons files "
+            f"vs {len(sim_files)} SimPhotons files"
+        )
 
-    # ── load all CSV batches ──────────────────────────────────────────────────
-    trace = pd.concat(
-        [pd.read_csv(f, comment='#') for f in trace_files],
-        ignore_index=True,
-    )
-    sim = pd.concat(
-        [pd.read_csv(f, comment='#') for f in sim_files],
-        ignore_index=True,
-    )
+    # ── load files pairwise, tagging each row with its file index ─────────────
+    trace_parts = []
+    sim_parts   = []
+    for file_id, (tf, sf) in enumerate(zip(trace_files, sim_files)):
+        t = pd.read_csv(tf, comment='#')
+        s = pd.read_csv(sf, comment='#')
+        t['_file_id'] = file_id
+        s['_file_id'] = file_id
+        trace_parts.append(t)
+        sim_parts.append(s)
+
+    trace = pd.concat(trace_parts, ignore_index=True)
+    sim   = pd.concat(sim_parts,   ignore_index=True)
     assoc = pd.read_csv(assoc_path)
 
     if verbose:
-        print(f"  TracedPhotons rows loaded : {len(trace):,}")
-        print(f"  SimPhotons    rows loaded : {len(sim):,}")
+        print(f"  TracedPhotons rows loaded : {len(trace):,}  ({len(trace_files)} files)")
+        print(f"  SimPhotons    rows loaded : {len(sim):,}  ({len(sim_files)} files)")
         print(f"  AssociatedResults rows    : {len(assoc):,}")
 
-    # TracedPhotons.id == SimPhotons.id; alias to sim_id for clarity
-    if 'sim_id' not in trace.columns:
-        trace = trace.rename(columns={'id': 'sim_id'})
+    # ── step 1: TracedPhotons → SimPhotons ────────────────────────────────────
+    # traced_sim_data_N.id == sim_data_N.id  (within the same file N)
+    keep_sim = [c for c in sim_cols if c in sim.columns]
+    sim_slim = sim[['_file_id', 'id'] + [c for c in keep_sim if c != 'id']]
 
-    # ── step 1: AssociatedResults → TracedPhotons (pixel-ID join) ────────────
-    trace['_px_x'] = trace['pixel_x'].astype(int)
-    trace['_px_y'] = trace['pixel_y'].astype(int)
-
-    TRACE_CARRY = [c for c in ['sim_id', 'pulse_id', 'neutron_id', 'pulse_time_ns']
-                   if c in trace.columns]
-    trace_idx = (
-        trace
-        .drop_duplicates(subset=['_px_x', '_px_y'])
-        .set_index(['_px_x', '_px_y'])
-        [TRACE_CARRY]
+    trace_with_sim = trace.merge(
+        sim_slim,
+        left_on=['_file_id', 'id'],
+        right_on=['_file_id', 'id'],
+        how='left',
     )
+    trace_with_sim.drop(columns=['_file_id'], inplace=True)
 
-    assoc['_px_x'] = assoc['px/x'].astype(int)
-    assoc['_px_y'] = assoc['px/y'].astype(int)
+    if verbose:
+        n_t = len(trace_with_sim)
+        truth_col = next((c for c in keep_sim if c not in ('id',)), None)
+        n_matched = int(trace_with_sim[truth_col].notna().sum()) if truth_col else n_t
+        print(f"  Step 1 match rate (trace→sim): {n_matched/n_t:.1%}  ({n_matched:,} / {n_t:,})")
 
-    combined = assoc.join(trace_idx, on=['_px_x', '_px_y'], how='left')
-    combined.drop(columns=['_px_x', '_px_y'], inplace=True)
+    # ── step 2: AssociatedResults → TracedPhotons by row index ────────────────
+    # TracedPhotons rows are 1-to-1 with ExportedPixels rows (same order).
+    # AssociatedResults preserves that order → row index is the join key.
+    TRACE_CARRY = [c for c in ['id', 'neutron_id', 'pulse_id', 'pulse_time_ns']
+                   if c in trace_with_sim.columns]
+    TRACE_CARRY += [c for c in keep_sim
+                    if c not in TRACE_CARRY and c in trace_with_sim.columns]
+
+    combined = assoc.join(
+        trace_with_sim[TRACE_CARRY].rename(columns={'id': 'sim_id'}),
+        how='left',
+    )
 
     if verbose:
         n_total   = len(combined)
         n_matched = int(combined['sim_id'].notna().sum()) if 'sim_id' in combined.columns else 0
-        pct = n_matched / n_total if n_total else 0
-        print(f"  Step 1 match rate (px→trace) : {pct:.1%}  ({n_matched:,} / {n_total:,})")
-
-    # ── step 2: → SimPhotons (exact merge on sim_id + pulse_id) ───────────────
-    keep_sim = [c for c in sim_cols if c in sim.columns]
-    sim_slim = sim[keep_sim].rename(columns={'id': 'sim_id'})
-
-    # Drop sim columns already present in combined (came from TracedPhotons)
-    # to avoid duplicate suffixes; join keys are intentionally kept.
-    already_present = [
-        c for c in sim_slim.columns
-        if c in combined.columns and c not in ('sim_id', 'pulse_id')
-    ]
-    if already_present:
-        sim_slim = sim_slim.drop(columns=already_present)
-
-    combined = combined.merge(sim_slim, on=['sim_id', 'pulse_id'], how='left')
-
-    if verbose:
-        truth_col = next(
-            (c for c in ('neutronEnergy', 'parentEnergy', 'x') if c in combined.columns),
-            None,
-        )
-        n_sim = int(combined['sim_id'].notna().sum()) if 'sim_id' in combined.columns else 0
-        n_step2 = int(combined[truth_col].notna().sum()) if truth_col else 0
-        pct2 = n_step2 / n_sim if n_sim else 0
-        print(f"  Step 2 match rate (trace→sim): {pct2:.1%}  ({n_step2:,} / {n_sim:,})")
+        print(f"  Step 2 match rate (assoc→trace): {n_matched/n_total:.1%}  ({n_matched:,} / {n_total:,})")
+        if verbose and 'px/x' in combined.columns and 'pixel_x' in trace_with_sim.columns:
+            # Sanity check: pixel coordinates should agree after join
+            px_match = (combined['px/x'].astype(int) ==
+                        trace_with_sim['pixel_x'].astype(int).iloc[:len(combined)].values).mean()
+            print(f"  Coordinate sanity (px/x == pixel_x): {px_match:.1%}")
 
     return combined
