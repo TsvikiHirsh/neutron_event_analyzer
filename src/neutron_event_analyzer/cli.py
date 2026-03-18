@@ -224,9 +224,19 @@ def create_assoc_parser():
         action='store_true',
         default=False,
         help=(
-            'After association, join AssociatedResults → TracedPhotons → SimPhotons '
-            'using the data folder as the archive root. '
+            'After association, join AssociatedResults → TracedPhotons → SimPhotons. '
+            'Uses the parent of the data folder as the archive root (where '
+            'TracedPhotons/ and SimPhotons/ live). '
             'Saves combined[_suffix].csv alongside associated_data[_suffix].csv.'
+        ),
+    )
+    parser.add_argument(
+        '--merge-only',
+        action='store_true',
+        default=False,
+        help=(
+            'Skip association entirely; only run the sim truth merge on an existing '
+            'AssociatedResults/associated_data[_suffix].csv. Implies --merge-sim.'
         ),
     )
 
@@ -284,78 +294,79 @@ def main_assoc():
         if args.suffix:
             print(f"Suffix: {args.suffix}")
 
-    # ------------------------------------------------------------------
-    # Initialise analyser
-    # ------------------------------------------------------------------
-    try:
-        analyser = Analyse(
-            data_folder=args.data,
-            settings=args.settings,
-            n_threads=args.threads or 10,
-            verbosity=verbosity,
-            auto_load=False,
-        )
-    except Exception as e:
-        print(f"Error: {e}")
-        if verbosity >= 2:
-            import traceback
-            traceback.print_exc()
-        sys.exit(1)
+    if not args.merge_only:
+        # ------------------------------------------------------------------
+        # Initialise analyser
+        # ------------------------------------------------------------------
+        try:
+            analyser = Analyse(
+                data_folder=args.data,
+                settings=args.settings,
+                n_threads=args.threads or 10,
+                verbosity=verbosity,
+                auto_load=False,
+            )
+        except Exception as e:
+            print(f"Error: {e}")
+            if verbosity >= 2:
+                import traceback
+                traceback.print_exc()
+            sys.exit(1)
 
-    # ------------------------------------------------------------------
-    # Load data
-    # ------------------------------------------------------------------
-    try:
-        analyser.load(
-            events=not args.no_events,
-            photons=not args.no_photons,
-            pixels=not args.no_pixels,
-            limit=args.limit,
-            query=args.query,
-            verbosity=verbosity,
-        )
-    except Exception as e:
-        print(f"Error loading data: {e}")
-        if verbosity >= 2:
-            import traceback
-            traceback.print_exc()
-        sys.exit(1)
+        # ------------------------------------------------------------------
+        # Load data
+        # ------------------------------------------------------------------
+        try:
+            analyser.load(
+                events=not args.no_events,
+                photons=not args.no_photons,
+                pixels=not args.no_pixels,
+                limit=args.limit,
+                query=args.query,
+                verbosity=verbosity,
+            )
+        except Exception as e:
+            print(f"Error loading data: {e}")
+            if verbosity >= 2:
+                import traceback
+                traceback.print_exc()
+            sys.exit(1)
 
-    # ------------------------------------------------------------------
-    # Associate
-    # ------------------------------------------------------------------
-    assoc_kwargs = {
-        'method': args.method,
-        'verbosity': verbosity,
-        'suffix': args.suffix,
-    }
-    if args.relax is not None:
-        assoc_kwargs['relax'] = args.relax
-    if args.pixel_max_dist is not None:
-        assoc_kwargs['pixel_max_dist_px'] = args.pixel_max_dist
-    if args.pixel_max_time is not None:
-        assoc_kwargs['pixel_max_time_ns'] = args.pixel_max_time
-    if args.photon_dspace is not None:
-        assoc_kwargs['photon_dSpace_px'] = args.photon_dspace
-    if args.max_time is not None:
-        assoc_kwargs['max_time_ns'] = args.max_time
-    if args.min_pixels is not None:
-        assoc_kwargs['min_pixels'] = args.min_pixels
+        # ------------------------------------------------------------------
+        # Associate
+        # ------------------------------------------------------------------
+        assoc_kwargs = {
+            'method': args.method,
+            'verbosity': verbosity,
+            'suffix': args.suffix,
+        }
+        if args.relax is not None:
+            assoc_kwargs['relax'] = args.relax
+        if args.pixel_max_dist is not None:
+            assoc_kwargs['pixel_max_dist_px'] = args.pixel_max_dist
+        if args.pixel_max_time is not None:
+            assoc_kwargs['pixel_max_time_ns'] = args.pixel_max_time
+        if args.photon_dspace is not None:
+            assoc_kwargs['photon_dSpace_px'] = args.photon_dspace
+        if args.max_time is not None:
+            assoc_kwargs['max_time_ns'] = args.max_time
+        if args.min_pixels is not None:
+            assoc_kwargs['min_pixels'] = args.min_pixels
 
-    try:
-        analyser.associate(**assoc_kwargs)
-    except Exception as e:
-        print(f"Error during association: {e}")
-        if verbosity >= 2:
-            import traceback
-            traceback.print_exc()
-        sys.exit(1)
+        try:
+            analyser.associate(**assoc_kwargs)
+        except Exception as e:
+            print(f"Error during association: {e}")
+            if verbosity >= 2:
+                import traceback
+                traceback.print_exc()
+            sys.exit(1)
 
     # ------------------------------------------------------------------
     # Save to user-specified output dir (if given)
     # associate() already auto-saves to AssociatedResults/ by default.
     # ------------------------------------------------------------------
-    if args.output_dir:
+    if args.output_dir and not args.merge_only:
         try:
             out = analyser.save_associations(
                 output_dir=args.output_dir,
@@ -372,14 +383,15 @@ def main_assoc():
     # ------------------------------------------------------------------
     # Merge simulation truth tables if requested
     # ------------------------------------------------------------------
-    if args.merge_sim:
+    if args.merge_sim or args.merge_only:
         from .analyser import build_combined
+        archive = Path(args.data).parent
         if verbosity >= 1:
-            print(f"Merging sim truth from: {args.merge_sim}")
+            print(f"Merging sim truth from: {archive}")
         try:
             combined = build_combined(
                 run_dir=Path(args.data),
-                archive=Path(args.data),
+                archive=archive,
                 suffix=args.suffix or '',
                 verbose=verbosity >= 1,
             )
