@@ -2458,19 +2458,23 @@ def build_combined(run_dir, archive, suffix='', sim_cols=None, verbose=False):
     # ── step 1: TracedPhotons → SimPhotons ────────────────────────────────────
     # traced_sim_data_N.id == sim_data_N.id  (within the same file N)
     keep_sim = [c for c in sim_cols if c in sim.columns]
-    sim_slim = sim[['_file_id', 'id'] + [c for c in keep_sim if c != 'id']]
+
+    # Only bring in sim columns not already present in trace to avoid collisions
+    trace_cols = set(trace.columns)
+    new_sim_cols = [c for c in keep_sim if c not in trace_cols and c != 'id']
+    sim_slim = sim[['_file_id', 'id'] + new_sim_cols]
 
     trace_with_sim = trace.merge(
         sim_slim,
-        left_on=['_file_id', 'id'],
-        right_on=['_file_id', 'id'],
+        on=['_file_id', 'id'],
         how='left',
     )
     trace_with_sim.drop(columns=['_file_id'], inplace=True)
 
     if verbose:
         n_t = len(trace_with_sim)
-        truth_col = next((c for c in keep_sim if c not in ('id',)), None)
+        _physics = ('neutronEnergy', 'parentEnergy', 'wavelength', 'x')
+        truth_col = next((c for c in _physics if c in trace_with_sim.columns), None)
         n_matched = int(trace_with_sim[truth_col].notna().sum()) if truth_col else n_t
         print(f"  Step 1 match rate (trace→sim): {n_matched/n_t:.1%}  ({n_matched:,} / {n_t:,})")
 
