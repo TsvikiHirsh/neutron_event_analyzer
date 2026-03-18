@@ -221,12 +221,11 @@ def create_assoc_parser():
     # ---- Simulation truth merge --------------------------------------------
     parser.add_argument(
         '--merge-sim',
-        type=str,
-        default=None,
-        metavar='ARCHIVE_DIR',
+        action='store_true',
+        default=False,
         help=(
-            'After association, join AssociatedResults → TracedPhotons → SimPhotons. '
-            'Provide the archive root that contains TracedPhotons/ and SimPhotons/. '
+            'After association, join AssociatedResults → TracedPhotons → SimPhotons '
+            'using the data folder as the archive root. '
             'Saves combined[_suffix].csv alongside associated_data[_suffix].csv.'
         ),
     )
@@ -294,6 +293,7 @@ def main_assoc():
             settings=args.settings,
             n_threads=args.threads or 10,
             verbosity=verbosity,
+            auto_load=False,
         )
     except Exception as e:
         print(f"Error: {e}")
@@ -379,7 +379,7 @@ def main_assoc():
         try:
             combined = build_combined(
                 run_dir=Path(args.data),
-                archive=Path(args.merge_sim),
+                archive=Path(args.data),
                 suffix=args.suffix or '',
                 verbose=verbosity >= 1,
             )

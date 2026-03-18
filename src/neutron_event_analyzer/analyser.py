@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class Analyse:
-    def __init__(self, data_folder, settings=None, n_threads=10, verbosity=1):
+    def __init__(self, data_folder, settings=None, n_threads=10, verbosity=1, auto_load=True):
         """
         Initialize the Analyse object.
 
@@ -83,7 +83,8 @@ class Analyse:
                 pass
 
         # Load raw data
-        self.load(verbosity=verbosity)
+        if auto_load:
+            self.load(verbosity=verbosity)
 
     # =========================================================================
     # Settings helpers
