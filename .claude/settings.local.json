@@ -55,7 +55,18 @@
       "Bash(/root/micromamba/bin/python3.13 -c \"import threadpoolctl; print\\(''threadpoolctl available:'', threadpoolctl.__version__\\)\")",
       "Bash(time /root/micromamba/bin/nea-assoc /work/nuclear/PTB/data/PTB2024/out_of_focus --settings /work/nuclear/PTB/data/PTB2024/parameterSettings_out_of_focus.json -q)",
       "Bash(/root/micromamba/bin/python3.13 -m cProfile -o /tmp/nea_final.out /root/micromamba/bin/nea-assoc /work/nuclear/PTB/data/PTB2024/out_of_focus --settings /work/nuclear/PTB/data/PTB2024/parameterSettings_out_of_focus.json -q)",
-      "Bash(__NEW_LINE_675ce8d4c2afaa81__ /root/micromamba/bin/python3.13 -c \":*)"
+      "Bash(__NEW_LINE_675ce8d4c2afaa81__ /root/micromamba/bin/python3.13 -c \":*)",
+      "Bash(/root/micromamba run -n base python3 -c \":*)",
+      "Read(//root/micromamba/**)",
+      "Read(//root/**)",
+      "Bash(find /work/nuclear/G4LumaCam -name empir* -o -name *.json -path */PTB*)",
+      "Bash(find /work/nuclear/PTB -name parameterSettings*.json)",
+      "Bash(head -3 /work/nuclear/G4LumaCam/notebooks/archive/openbeam_ptb_hs/high_stats/oof__blob_1.8__deadtime_1000__decay_time_400__gain_10/ExportedPhotons/*.csv)",
+      "Bash(head -5 /work/nuclear/G4LumaCam/notebooks/archive/openbeam_ptb_hs/high_stats/oof__blob_1.8__deadtime_1000__decay_time_400__gain_10/ExportedPixels/*.csv)",
+      "Bash(head -3 /work/nuclear/G4LumaCam/notebooks/archive/openbeam_ptb_hs/high_stats/oof__blob_1.8__deadtime_1000__decay_time_400__gain_10/photonFiles/*.json)",
+      "Bash(find /work/nuclear/G4LumaCam -name *.py -o -name *.mac -o -name *.json)",
+      "Bash(pip3 show:*)",
+      "Bash(~/.local/bin/micromamba run -n base python3 -c \":*)"
     ]
   }
 }

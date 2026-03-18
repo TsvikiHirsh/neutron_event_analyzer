@@ -218,6 +218,19 @@ def create_assoc_parser():
         help='Scale all association parameters by this factor (e.g. 1.5 = 50%% more relaxed)',
     ))
 
+    # ---- Simulation truth merge --------------------------------------------
+    parser.add_argument(
+        '--merge-sim',
+        type=str,
+        default=None,
+        metavar='ARCHIVE_DIR',
+        help=(
+            'After association, join AssociatedResults → TracedPhotons → SimPhotons. '
+            'Provide the archive root that contains TracedPhotons/ and SimPhotons/. '
+            'Saves combined[_suffix].csv alongside associated_data[_suffix].csv.'
+        ),
+    )
+
     # ---- Output (advanced) -------------------------------------------------
     _mark_advanced(parser.add_argument(
         '--output-dir', '-o',
@@ -355,6 +368,37 @@ def main_assoc():
         except Exception as e:
             print(f"Error saving to {args.output_dir}: {e}")
             sys.exit(1)
+
+    # ------------------------------------------------------------------
+    # Merge simulation truth tables if requested
+    # ------------------------------------------------------------------
+    if args.merge_sim:
+        from .analyser import build_combined
+        if verbosity >= 1:
+            print(f"Merging sim truth from: {args.merge_sim}")
+        try:
+            combined = build_combined(
+                run_dir=Path(args.data),
+                archive=Path(args.merge_sim),
+                suffix=args.suffix or '',
+                verbose=verbosity >= 1,
+            )
+            stem = f"combined_{args.suffix}" if args.suffix else "combined"
+            ext  = '.parquet' if args.format == 'parquet' else '.csv'
+            out_path = Path(args.output_dir) if args.output_dir else Path(args.data) / 'AssociatedResults'
+            out_path.mkdir(parents=True, exist_ok=True)
+            out_file = out_path / (stem + ext)
+            if args.format == 'parquet':
+                combined.to_parquet(out_file, index=False)
+            else:
+                combined.to_csv(out_file, index=False)
+            if verbosity >= 1:
+                print(f"Combined saved → {out_file}  ({len(combined):,} rows × {len(combined.columns)} cols)")
+        except Exception as e:
+            print(f"Error during sim merge: {e}")
+            if verbosity >= 2:
+                import traceback
+                traceback.print_exc()
 
     if verbosity >= 1:
         print("=" * 60)
