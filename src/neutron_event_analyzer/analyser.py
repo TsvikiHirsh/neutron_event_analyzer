@@ -2346,7 +2346,6 @@ class Analyse:
 # build_combined — module-level function
 # =============================================================================
 
-_TOA_BIN_NS = 1  # nanosecond quantisation bucket for pixel→trace index
 
 _DEFAULT_SIM_COLS = [
     'id', 'pulse_id', 'neutron_id', 'pulse_time_ns',
@@ -2368,8 +2367,8 @@ def build_combined(run_dir, archive, suffix='', sim_cols=None, verbose=False):
     Join strategy
     -------------
     Step 1  AssociatedResults → TracedPhotons
-            Exact MultiIndex on (int pixel_x, int pixel_y, toa_ns_int).
-            No nearest-neighbour approximation; O(1) per row.
+            Exact join on integer pixel coordinates (pixel_x, pixel_y).
+            No time comparison; O(1) per row via MultiIndex lookup.
     Step 2  TracedPhotons → SimPhotons
             Exact merge on (sim_id, pulse_id).
             sim_id == SimPhotons.id (Geant4 track ID).
@@ -2452,26 +2451,24 @@ def build_combined(run_dir, archive, suffix='', sim_cols=None, verbose=False):
     if 'sim_id' not in trace.columns:
         trace = trace.rename(columns={'id': 'sim_id'})
 
-    # ── step 1: AssociatedResults → TracedPhotons (exact MultiIndex join) ─────
-    trace['_px_x']    = trace['pixel_x'].astype(int)
-    trace['_px_y']    = trace['pixel_y'].astype(int)
-    trace['_toa_key'] = (trace['toa2'] / _TOA_BIN_NS).round().astype('int64')
+    # ── step 1: AssociatedResults → TracedPhotons (pixel-ID join) ────────────
+    trace['_px_x'] = trace['pixel_x'].astype(int)
+    trace['_px_y'] = trace['pixel_y'].astype(int)
 
     TRACE_CARRY = [c for c in ['sim_id', 'pulse_id', 'neutron_id', 'pulse_time_ns']
                    if c in trace.columns]
     trace_idx = (
         trace
-        .drop_duplicates(subset=['_px_x', '_px_y', '_toa_key'])
-        .set_index(['_px_x', '_px_y', '_toa_key'])
+        .drop_duplicates(subset=['_px_x', '_px_y'])
+        .set_index(['_px_x', '_px_y'])
         [TRACE_CARRY]
     )
 
-    assoc['_px_x']    = assoc['px/x'].astype(int)
-    assoc['_px_y']    = assoc['px/y'].astype(int)
-    assoc['_toa_key'] = (assoc['px/toa'] * 1e9 / _TOA_BIN_NS).round().astype('int64')
+    assoc['_px_x'] = assoc['px/x'].astype(int)
+    assoc['_px_y'] = assoc['px/y'].astype(int)
 
-    combined = assoc.join(trace_idx, on=['_px_x', '_px_y', '_toa_key'], how='left')
-    combined.drop(columns=['_px_x', '_px_y', '_toa_key'], inplace=True)
+    combined = assoc.join(trace_idx, on=['_px_x', '_px_y'], how='left')
+    combined.drop(columns=['_px_x', '_px_y'], inplace=True)
 
     if verbose:
         n_total   = len(combined)

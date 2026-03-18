@@ -113,7 +113,8 @@ trace_idx = (
     .assign(
         _px_x    = lambda d: d['pixel_x'].astype(int),
         _px_y    = lambda d: d['pixel_y'].astype(int),
-        _toa_key = lambda d: d['toa2'].round().astype('int64'),
+        # quantise true toa2 (ns) to Timepix3 clock ticks (1.5625 ns)
+        _toa_key = lambda d: (d['toa2'] / 1.5625).round().astype('int64'),
     )
     .drop_duplicates(subset=['_px_x', '_px_y', '_toa_key'])
     .set_index(['_px_x', '_px_y', '_toa_key'])
@@ -122,7 +123,8 @@ trace_idx = (
 
 assoc['_px_x']    = assoc['px/x'].astype(int)
 assoc['_px_y']    = assoc['px/y'].astype(int)
-assoc['_toa_key'] = (assoc['px/toa'] * 1e9).round().astype('int64')
+# px/toa is in seconds, already clock-tick-quantised — convert to ticks
+assoc['_toa_key'] = (assoc['px/toa'] * 1e9 / 1.5625).round().astype('int64')
 
 combined = assoc.join(trace_idx, on=['_px_x', '_px_y', '_toa_key'], how='left')
 combined.drop(columns=['_px_x', '_px_y', '_toa_key'], inplace=True)
