@@ -2452,6 +2452,9 @@ def build_combined(run_dir, archive, suffix='', sim_cols=None, verbose=False):
     trace = pd.concat(trace_parts, ignore_index=True)
     sim   = pd.concat(sim_parts,   ignore_index=True)
     assoc = pd.read_csv(assoc_path)
+    # Drop any sim/* columns from a previous merge run to avoid .1 duplicates
+    assoc = assoc.drop(columns=[c for c in assoc.columns if c.startswith('sim/')],
+                       errors='ignore')
 
     if verbose:
         print(f"  TracedPhotons rows loaded : {len(trace):,}  ({len(trace_files)} files)")
@@ -2459,19 +2462,38 @@ def build_combined(run_dir, archive, suffix='', sim_cols=None, verbose=False):
         print(f"  AssociatedResults rows    : {len(assoc):,}")
 
     # ── step 1: TracedPhotons → SimPhotons ────────────────────────────────────
-    # traced_sim_data_N.id == sim_data_N.id  (within the same file N)
+    # Join key: (_file_id, id, pulse_id)
+    # id is the Geant4 track ID — it repeats across pulses within a file,
+    # so pulse_id is required to disambiguate.
     keep_sim = [c for c in sim_cols if c in sim.columns]
 
     # Only bring in sim columns not already present in trace to avoid collisions
     trace_cols = set(trace.columns)
     new_sim_cols = [c for c in keep_sim if c not in trace_cols and c != 'id']
-    sim_slim = sim[['_file_id', 'id'] + new_sim_cols]
+
+    # pulse_id must be in sim_slim as a join key even if trace already has it.
+    # id repeats across pulses within a file; (file, id, pulse_id) is unique.
+    _sim_join_cols = ['_file_id', 'id']
+    if 'pulse_id' in sim.columns:
+        _sim_join_cols.append('pulse_id')
+    _sim_value_cols = [c for c in new_sim_cols if c not in _sim_join_cols]
+    sim_slim = (sim[_sim_join_cols + _sim_value_cols]
+                .drop_duplicates(subset=_sim_join_cols))
+
+    _trace_join_cols = ['_file_id', 'id']
+    if 'pulse_id' in trace.columns and 'pulse_id' in sim.columns:
+        _trace_join_cols.append('pulse_id')
 
     trace_with_sim = trace.merge(
         sim_slim,
-        on=['_file_id', 'id'],
+        on=_trace_join_cols,
         how='left',
+        suffixes=('', '_sim'),
     )
+    # Drop any _sim-suffixed duplicate column (pulse_id_sim etc.)
+    _dup_cols = [c for c in trace_with_sim.columns if c.endswith('_sim')]
+    if _dup_cols:
+        trace_with_sim.drop(columns=_dup_cols, inplace=True)
     trace_with_sim.drop(columns=['_file_id'], inplace=True)
 
     if verbose:
@@ -2513,11 +2535,13 @@ def build_combined(run_dir, archive, suffix='', sim_cols=None, verbose=False):
         _tws = trace_with_sim.assign(
             _toa_key=(trace_with_sim['toa2'] / TICK).round().astype('int64'),
         )
+        # pixel_x/pixel_y are the index keys here, exclude from value columns
+        _carry_vals = [c for c in TRACE_CARRY if c not in ('pixel_x', 'pixel_y')]
         trace_idx = (
             _tws
             .drop_duplicates(subset=['pixel_x', 'pixel_y', '_toa_key'])
             .set_index(['pixel_x', 'pixel_y', '_toa_key'])
-            [TRACE_CARRY]
+            [_carry_vals]
             .rename(columns={_id_col: 'sim_id'})
         )
         assoc = assoc.copy()
@@ -2543,6 +2567,10 @@ def build_combined(run_dir, archive, suffix='', sim_cols=None, verbose=False):
             for col in trace_idx.columns:
                 combined.loc[_unmatched, col] = _fb_result[col].values
 
+        # Restore pixel_x/pixel_y as sim columns for matched rows
+        _sim_matched = combined['sim_id'].notna()
+        combined['pixel_x'] = combined['_px_x'].where(_sim_matched)
+        combined['pixel_y'] = combined['_px_y'].where(_sim_matched)
         combined.drop(columns=['_px_x', '_px_y', '_toa_key'], inplace=True)
 
     if verbose:
