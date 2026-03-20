@@ -2506,7 +2506,7 @@ def build_combined(run_dir, archive, suffix='', sim_cols=None, verbose=False):
     # ── step 2: AssociatedResults → TracedPhotons ─────────────────────────────
     _id_col = 'sim_id' if 'sim_id' in trace_with_sim.columns else 'id'
     TRACE_CARRY = [_id_col]
-    for _c in ['neutron_id', 'pulse_id', 'pulse_time_ns', 'pixel_x', 'pixel_y']:
+    for _c in ['neutron_id', 'pulse_id', 'pulse_time_ns', 'pixel_x', 'pixel_y', 'toa2']:
         if _c in trace_with_sim.columns:
             TRACE_CARRY.append(_c)
     for _c in keep_sim:
@@ -2553,6 +2553,7 @@ def build_combined(run_dir, archive, suffix='', sim_cols=None, verbose=False):
         # 25 ns fallback: Timepix3 coarse-clock-boundary artefact shifts ~4% of
         # hits 16 ticks (25 ns) earlier in EMPIR output vs raw simulation TOA.
         # Try assoc_toa_tick + 16 for unmatched rows to recover them.
+        # For recovered rows, correct px/toa by adding 25 ns so it aligns with toa2.
         _unmatched = combined['sim_id'].isna()
         if _unmatched.any():
             _toa_fb = assoc.loc[_unmatched, '_toa_key'] + 16
@@ -2566,6 +2567,10 @@ def build_combined(run_dir, archive, suffix='', sim_cols=None, verbose=False):
             )
             for col in trace_idx.columns:
                 combined.loc[_unmatched, col] = _fb_result[col].values
+            # Apply +25 ns TOA correction for rows recovered via fallback
+            _recovered = _unmatched & combined['sim_id'].notna()
+            if _recovered.any() and 'px/toa' in combined.columns:
+                combined.loc[_recovered, 'px/toa'] += 16 * TICK * 1e-9  # 25 ns in seconds
 
         # Restore pixel_x/pixel_y as sim columns for matched rows
         _sim_matched = combined['sim_id'].notna()
@@ -2579,7 +2584,7 @@ def build_combined(run_dir, archive, suffix='', sim_cols=None, verbose=False):
         print(f"  Step 2 match rate (assoc→trace): {n_matched/n_total:.1%}  ({n_matched:,} / {n_total:,})")
 
     # ── rename sim-derived columns to sim/ prefix ─────────────────────────────
-    _sim_src = set(_DEFAULT_SIM_COLS) | {'neutron_id', 'pulse_id', 'pulse_time_ns', 'pixel_x', 'pixel_y'}
+    _sim_src = set(_DEFAULT_SIM_COLS) | {'neutron_id', 'pulse_id', 'pulse_time_ns', 'pixel_x', 'pixel_y', 'toa2'}
     _rename = {c: f'sim/{c}' for c in combined.columns if c in _sim_src}
     _rename['sim_id'] = 'sim/id'
     combined = combined.rename(columns=_rename)

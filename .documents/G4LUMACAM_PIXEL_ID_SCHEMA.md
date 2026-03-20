@@ -85,17 +85,27 @@ ep['pixel_id'] = ep.index  # 0-based row number across all concatenated part-fil
 
 ### Step 3 — Join TracedPhotons → ExportedPixels on (x, y, toa_tick)
 
+> **EMPIR coarse-clock correction:**  EMPIR can be configured to apply a +25 ns
+> correction to hits that cross a Timepix3 coarse-clock boundary.  Check whether
+> this correction is enabled for your run before deciding whether the fallback
+> below is needed:
+>
+> - **Correction enabled** (recommended): `ExportedPixels.t` has already been
+>   corrected — the exact join below will match ~100 % of rows with no fallback.
+> - **Correction disabled** (legacy data): `ExportedPixels.t` for ~4 % of hits
+>   is 25 ns (16 ticks) earlier than `toa2`.  Use the fallback block below to
+>   recover them.
+
 ```python
 ep_idx = ep.set_index(['ep_x', 'ep_y', 'toa_tick'])[['pixel_id']]
 
 traced = traced.join(ep_idx, on=['pixel_x', 'pixel_y', 'toa2_tick'], how='left')
 
-# ── 25 ns fallback ────────────────────────────────────────────────────────────
-# A known Timepix3 artefact: when a hit's fast-TDC measurement crosses a coarse
-# clock boundary (25 ns = 16 × 1.5625 ns ticks), EMPIR assigns the hit to the
-# *previous* coarse clock window.  This shifts ~4 % of EP rows 16 ticks (25 ns)
-# earlier relative to the raw simulation TOA.  A single +16-tick retry recovers
-# essentially all of them (observed: 99.99 % total match rate).
+# ── 25 ns fallback (only needed when EMPIR coarse-clock correction is OFF) ────
+# When a hit's fast-TDC measurement crosses a coarse clock boundary
+# (25 ns = 16 × 1.5625 ns ticks), EMPIR without correction assigns the hit to
+# the *previous* coarse clock window, shifting ~4 % of EP rows 16 ticks earlier
+# relative to the raw simulation TOA.  A single +16-tick retry recovers them.
 mask = traced['pixel_id'].isna()
 if mask.any():
     traced.loc[mask, 'toa2_tick_fb'] = traced.loc[mask, 'toa2_tick'] - 16
