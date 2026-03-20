@@ -2484,7 +2484,7 @@ def build_combined(run_dir, archive, suffix='', sim_cols=None, verbose=False):
     # ── step 2: AssociatedResults → TracedPhotons ─────────────────────────────
     _id_col = 'sim_id' if 'sim_id' in trace_with_sim.columns else 'id'
     TRACE_CARRY = [_id_col]
-    for _c in ['neutron_id', 'pulse_id', 'pulse_time_ns']:
+    for _c in ['neutron_id', 'pulse_id', 'pulse_time_ns', 'pixel_x', 'pixel_y']:
         if _c in trace_with_sim.columns:
             TRACE_CARRY.append(_c)
     for _c in keep_sim:
@@ -2551,7 +2551,7 @@ def build_combined(run_dir, archive, suffix='', sim_cols=None, verbose=False):
         print(f"  Step 2 match rate (assoc→trace): {n_matched/n_total:.1%}  ({n_matched:,} / {n_total:,})")
 
     # ── rename sim-derived columns to sim/ prefix ─────────────────────────────
-    _sim_src = set(_DEFAULT_SIM_COLS) | {'neutron_id', 'pulse_id', 'pulse_time_ns'}
+    _sim_src = set(_DEFAULT_SIM_COLS) | {'neutron_id', 'pulse_id', 'pulse_time_ns', 'pixel_x', 'pixel_y'}
     _rename = {c: f'sim/{c}' for c in combined.columns if c in _sim_src}
     _rename['sim_id'] = 'sim/id'
     combined = combined.rename(columns=_rename)
