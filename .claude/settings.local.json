@@ -66,7 +66,13 @@
       "Bash(head -3 /work/nuclear/G4LumaCam/notebooks/archive/openbeam_ptb_hs/high_stats/oof__blob_1.8__deadtime_1000__decay_time_400__gain_10/photonFiles/*.json)",
       "Bash(find /work/nuclear/G4LumaCam -name *.py -o -name *.mac -o -name *.json)",
       "Bash(pip3 show:*)",
-      "Bash(~/.local/bin/micromamba run -n base python3 -c \":*)"
+      "Bash(~/.local/bin/micromamba run -n base python3 -c \":*)",
+      "Bash(find /work/nuclear/PTB/data/PTB2024/ -name traced_sim_data_*.csv)",
+      "Bash(find /work/nuclear/ -path */AssociatedResults/associated_data.csv)",
+      "Bash(find /work/nuclear/PTB/data/PTB2024/ -name ExportedPixels*)",
+      "Bash(find /work/nuclear/PTB/data/PTB2024/ -path */TracedPhotons/*.csv)",
+      "Bash(find /work/nuclear/G4LumaCam/ -path */TracedPhotons/*.csv)",
+      "Bash(find /work/nuclear/PTB/ -name traced_sim_data_*.csv)"
     ]
   }
 }

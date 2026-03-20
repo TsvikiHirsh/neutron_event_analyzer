@@ -2416,8 +2416,11 @@ def build_combined(run_dir, archive, suffix='', sim_cols=None, verbose=False):
     if not assoc_path.exists():
         raise FileNotFoundError(f"AssociatedResults not found: {assoc_path}")
 
-    trace_dir = archive / 'TracedPhotons'
-    sim_dir   = archive / 'SimPhotons'
+    # TracedPhotons: prefer run_dir-local copy, fall back to archive root
+    trace_dir = run_dir / 'TracedPhotons'
+    if not trace_dir.exists():
+        trace_dir = archive / 'TracedPhotons'
+    sim_dir = archive / 'SimPhotons'
     if not trace_dir.exists():
         raise FileNotFoundError(f"TracedPhotons directory not found: {trace_dir}")
     if not sim_dir.exists():
@@ -2478,27 +2481,74 @@ def build_combined(run_dir, archive, suffix='', sim_cols=None, verbose=False):
         n_matched = int(trace_with_sim[truth_col].notna().sum()) if truth_col else n_t
         print(f"  Step 1 match rate (trace→sim): {n_matched/n_t:.1%}  ({n_matched:,} / {n_t:,})")
 
-    # ── step 2: AssociatedResults → TracedPhotons by row index ────────────────
-    # TracedPhotons rows are 1-to-1 with ExportedPixels rows (same order).
-    # AssociatedResults preserves that order → row index is the join key.
-    TRACE_CARRY = [c for c in ['id', 'neutron_id', 'pulse_id', 'pulse_time_ns']
-                   if c in trace_with_sim.columns]
-    TRACE_CARRY += [c for c in keep_sim
-                    if c not in TRACE_CARRY and c in trace_with_sim.columns]
+    # ── step 2: AssociatedResults → TracedPhotons ─────────────────────────────
+    _id_col = 'sim_id' if 'sim_id' in trace_with_sim.columns else 'id'
+    TRACE_CARRY = [_id_col]
+    for _c in ['neutron_id', 'pulse_id', 'pulse_time_ns']:
+        if _c in trace_with_sim.columns:
+            TRACE_CARRY.append(_c)
+    for _c in keep_sim:
+        # skip 'id' when sim_id is already carried — they hold the same value
+        if _c == 'id' and _id_col == 'sim_id':
+            continue
+        if _c not in TRACE_CARRY and _c in trace_with_sim.columns:
+            TRACE_CARRY.append(_c)
 
-    combined = assoc.join(
-        trace_with_sim[TRACE_CARRY].rename(columns={'id': 'sim_id'}),
-        how='left',
-    )
+    if 'pixel_id' in trace_with_sim.columns:
+        # ── fast path: pixel_id is the row index of ExportedPixels / AssociatedResults
+        trace_idx = (
+            trace_with_sim
+            .dropna(subset=['pixel_id'])
+            .set_index('pixel_id')
+            [TRACE_CARRY]
+            .rename(columns={_id_col: 'sim_id'})
+        )
+        trace_idx.index = trace_idx.index.astype(int)
+        combined = assoc.join(trace_idx, how='left')
+    else:
+        # ── fallback: coordinate + TOA lookup (works at ~96 % for unmodified data)
+        # Join key: (int(px/x), int(px/y), round(px/toa_ns / TICK))
+        #        == (pixel_x,   pixel_y,   round(toa2       / TICK))
+        TICK = 1.5625  # ns — Timepix3 clock period
+        _tws = trace_with_sim.assign(
+            _toa_key=(trace_with_sim['toa2'] / TICK).round().astype('int64'),
+        )
+        trace_idx = (
+            _tws
+            .drop_duplicates(subset=['pixel_x', 'pixel_y', '_toa_key'])
+            .set_index(['pixel_x', 'pixel_y', '_toa_key'])
+            [TRACE_CARRY]
+            .rename(columns={_id_col: 'sim_id'})
+        )
+        assoc = assoc.copy()
+        assoc['_px_x']    = assoc['px/x'].astype(int)
+        assoc['_px_y']    = assoc['px/y'].astype(int)
+        assoc['_toa_key'] = (assoc['px/toa'] * 1e9 / TICK).round().astype('int64')
+        combined = assoc.join(trace_idx, on=['_px_x', '_px_y', '_toa_key'], how='left')
+
+        # 25 ns fallback: Timepix3 coarse-clock-boundary artefact shifts ~4% of
+        # hits 16 ticks (25 ns) earlier in EMPIR output vs raw simulation TOA.
+        # Try assoc_toa_tick + 16 for unmatched rows to recover them.
+        _unmatched = combined['sim_id'].isna()
+        if _unmatched.any():
+            _toa_fb = assoc.loc[_unmatched, '_toa_key'] + 16
+            _fb = _toa_fb.to_frame('_toa_key_fb').join(
+                assoc.loc[_unmatched, ['_px_x', '_px_y']]
+            )
+            _fb_result = _fb.join(
+                trace_idx.rename_axis(['_px_x', '_px_y', '_toa_key_fb']),
+                on=['_px_x', '_px_y', '_toa_key_fb'],
+                how='left',
+            )
+            for col in trace_idx.columns:
+                combined.loc[_unmatched, col] = _fb_result[col].values
+
+        combined.drop(columns=['_px_x', '_px_y', '_toa_key'], inplace=True)
 
     if verbose:
         n_total   = len(combined)
         n_matched = int(combined['sim_id'].notna().sum()) if 'sim_id' in combined.columns else 0
         print(f"  Step 2 match rate (assoc→trace): {n_matched/n_total:.1%}  ({n_matched:,} / {n_total:,})")
-        if 'px/x' in combined.columns and 'pixel_x' in trace_with_sim.columns:
-            px_match = (combined['px/x'].astype(int) ==
-                        trace_with_sim['pixel_x'].astype(int).iloc[:len(combined)].values).mean()
-            print(f"  Coordinate sanity (px/x == pixel_x): {px_match:.1%}")
 
     # ── rename sim-derived columns to sim/ prefix ─────────────────────────────
     _sim_src = set(_DEFAULT_SIM_COLS) | {'neutron_id', 'pulse_id', 'pulse_time_ns'}
