@@ -72,7 +72,8 @@
       "Bash(find /work/nuclear/PTB/data/PTB2024/ -name ExportedPixels*)",
       "Bash(find /work/nuclear/PTB/data/PTB2024/ -path */TracedPhotons/*.csv)",
       "Bash(find /work/nuclear/G4LumaCam/ -path */TracedPhotons/*.csv)",
-      "Bash(find /work/nuclear/PTB/ -name traced_sim_data_*.csv)"
+      "Bash(find /work/nuclear/PTB/ -name traced_sim_data_*.csv)",
+      "Bash(~/.local/bin/micromamba run:*)"
     ]
   }
 }

@@ -13,6 +13,121 @@ logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 
+def _joint_cog_search(px_x, px_y, px_tot, ph_x, ph_y, tol=0.005, max_states=5_000_000):
+    """
+    Branch-and-bound search for the pixel-to-photon assignment that reproduces
+    EMPIR photon centroids exactly (inverse engineering EMPIR's clustering).
+
+    For each group of competing photons sharing candidate pixels, finds the
+    partition of those pixels into photon groups such that the TOT-weighted
+    centroid of each group matches the target (ph_x[k], ph_y[k]) within `tol`.
+
+    The balance equation per photon k: Σ_i tot_i·(x_i − X_k) = 0
+    is used as the pruning criterion — remaining suffix balances bound whether
+    zero is still reachable, cutting the search space dramatically.
+
+    Parameters
+    ----------
+    px_x, px_y, px_tot : 1-D arrays, candidate pixel coordinates and weights
+    ph_x, ph_y          : 1-D arrays, target photon centroid positions
+    tol                 : acceptable centroid deviation (pixels); 0.005 → 2 d.p.
+    max_states          : hard cap on recursions before giving up
+
+    Returns
+    -------
+    assignment : int array length n_pixels — photon index 0..n_ph-1 or -1 (noise)
+    error      : float — sum of squared centroid deviations (0 = exact match)
+    """
+    n_px = len(px_x)
+    n_ph = len(ph_x)
+    if n_px == 0 or n_ph == 0:
+        return np.full(n_px, -1, dtype=int), np.inf
+
+    # Process pixels largest-TOT first: tightest balance constraints land early
+    order = np.argsort(-px_tot)
+    sx = px_x[order].astype(float)
+    sy = px_y[order].astype(float)
+    st = px_tot[order].astype(float)
+
+    # dx[i, k] = tot_i * (x_i - X_k): balance contribution of pixel i to photon k
+    dx = (sx[:, None] - ph_x[None, :]) * st[:, None]   # (n_px, n_ph)
+    dy = (sy[:, None] - ph_y[None, :]) * st[:, None]
+
+    # Suffix min/max achievable balance for each photon k (pixel i to end)
+    min_dx = np.zeros((n_px + 1, n_ph))
+    max_dx = np.zeros((n_px + 1, n_ph))
+    min_dy = np.zeros((n_px + 1, n_ph))
+    max_dy = np.zeros((n_px + 1, n_ph))
+    sfx_tot = np.zeros(n_px + 1)
+    for i in range(n_px - 1, -1, -1):
+        min_dx[i] = min_dx[i + 1] + np.minimum(dx[i], 0)
+        max_dx[i] = max_dx[i + 1] + np.maximum(dx[i], 0)
+        min_dy[i] = min_dy[i + 1] + np.minimum(dy[i], 0)
+        max_dy[i] = max_dy[i + 1] + np.maximum(dy[i], 0)
+        sfx_tot[i] = sfx_tot[i + 1] + st[i]
+
+    bal_x   = np.zeros(n_ph)
+    bal_y   = np.zeros(n_ph)
+    sum_tot = np.zeros(n_ph)
+    asgn    = np.full(n_px, -1, dtype=int)
+    best    = [None, np.inf]
+    states  = [0]
+
+    def _bt(idx):
+        if states[0] > max_states:
+            return
+        states[0] += 1
+
+        if idx == n_px:
+            err = 0.0
+            for k in range(n_ph):
+                if sum_tot[k] <= 0:
+                    return          # every photon must own at least one pixel
+                err += (bal_x[k] / sum_tot[k]) ** 2 + (bal_y[k] / sum_tot[k]) ** 2
+            if err < best[1]:
+                best[1] = err
+                best[0] = asgn.copy()
+            return
+
+        # Pruning: for each photon k, is balance = 0 still achievable?
+        rem = sfx_tot[idx]
+        for k in range(n_ph):
+            T_hi = sum_tot[k] + rem      # upper bound on final total TOT for k
+            if T_hi <= 0:
+                return
+            thresh = tol * T_hi + 1e-9
+            lo_x = bal_x[k] + min_dx[idx, k]
+            hi_x = bal_x[k] + max_dx[idx, k]
+            lo_y = bal_y[k] + min_dy[idx, k]
+            hi_y = bal_y[k] + max_dy[idx, k]
+            if lo_x > thresh or hi_x < -thresh or lo_y > thresh or hi_y < -thresh:
+                return
+
+        ti = st[idx]
+        for k in range(n_ph):
+            bal_x[k] += dx[idx, k]
+            bal_y[k] += dy[idx, k]
+            sum_tot[k] += ti
+            asgn[idx] = k
+            _bt(idx + 1)
+            bal_x[k] -= dx[idx, k]
+            bal_y[k] -= dy[idx, k]
+            sum_tot[k] -= ti
+
+        asgn[idx] = -1          # unassigned (noise)
+        _bt(idx + 1)
+
+    _bt(0)
+
+    if best[0] is None:
+        return np.full(n_px, -1, dtype=int), np.inf
+
+    result = np.full(n_px, -1, dtype=int)
+    for si, oi in enumerate(order):
+        result[oi] = best[0][si]
+    return result, best[1]
+
+
 class Analyse:
     def __init__(self, data_folder, settings=None, n_threads=10, verbosity=1, auto_load=True):
         """
@@ -1213,32 +1328,28 @@ class Analyse:
                                             max_dist_px=2.0, max_time_ns=50,
                                             min_pixels=1, relax=1, verbosity=0):
         """
-        Associate pixels to photons via adaptive subset search with priority-queue
-        claiming.
+        Reverse-engineer EMPIR's pixel-to-photon grouping algorithm.
 
-        Pass 1 — for every photon, find its natural best-matching pixel subset
-        (ignoring claims) using an adaptive search window that starts at
-        relax × (dSpace, dTime) and doubles until CoG distance < CONVERGE_DIST
-        or the search radius reaches MAX_SEARCH_PX.
-
-        Pass 2 — sort photons by their Pass-1 CoG distance (best first) and
-        claim pixels in that order.  When a photon's Pass-1 pixels are partly
-        claimed, re-run the subset search on the remaining unclaimed candidates.
-        This prevents co-temporal photons (same TOA) from stealing each other's
-        pixels due to arbitrary processing order.
+        For each photon (processed in ph/toa order):
+          1. Seed  — the unclaimed pixel whose toa equals ph/toa exactly
+                     (within one Timepix3 tick).  Ties broken by largest TOT.
+                     Falls back to ±25 ns (coarse-clock-boundary artefact).
+          2. Candidates — unclaimed pixels with toa ≥ seed toa, within the
+                     current time window and max_dist_px of (ph/x, ph/y).
+          3. Exact search — enumerate subsets of candidates (seed always
+                     included) in order of increasing size until the TOT-weighted
+                     centroid matches (ph/x, ph/y) to 2 decimal places (< 0.005).
+          4. Relax — if not found, double the time window and retry (up to 4×).
         """
-        CONVERGE_DIST = 0.02
-        MAX_SEARCH_PX = 100.0
-        MAX_CAND      = 15
+        import itertools
+
+        TICK_S        = 1.5625e-9          # Timepix3 clock tick in seconds
+        COARSE_CLK_S  = 16 * TICK_S        # 25 ns coarse-clock-boundary offset
+        COG_TOL       = 0.005              # centroid tolerance: 2 decimal places
+        MAX_CAND      = 20                 # hard cap on candidates for exact search
 
         if pixels_df is None or photons_df is None or len(pixels_df) == 0 or len(photons_df) == 0:
             return pixels_df
-
-        try:
-            import threadpoolctl as _tpc
-            _tpc.threadpool_limits(limits=1)
-        except ImportError:
-            pass
 
         pixels  = pixels_df.copy()
         photons = photons_df.copy()
@@ -1255,158 +1366,140 @@ class Analyse:
         pix_t   = pixels['t'].to_numpy()
         pix_x   = pixels['x'].to_numpy()
         pix_y   = pixels['y'].to_numpy()
-        pix_tot = pixels['tot'].to_numpy() if 'tot' in pixels.columns else np.ones(len(pixels))
-
-        base_time_s = max_time_ns / 1e9
-        TOL = 1e-12
-
-        relax_schedule = []
-        r = float(relax)
-        while True:
-            relax_schedule.append(r)
-            if r * max_dist_px >= MAX_SEARCH_PX:
-                break
-            r = min(r * 2, MAX_SEARCH_PX / max_dist_px)
-
-        if verbosity >= 2:
-            steps = [f"{s:.0f}×" for s in relax_schedule]
-            print(f"   empir relax schedule: {' → '.join(steps)} "
-                  f"(search radius {relax_schedule[0]*max_dist_px:.0f}–"
-                  f"{relax_schedule[-1]*max_dist_px:.0f} px)")
+        pix_tot = (pixels['tot'].to_numpy().astype(float)
+                   if 'tot' in pixels.columns else np.ones(len(pixels)))
 
         n_px      = len(pixels)
         n_photons = len(photons)
-        ph_t_arr  = photons['t'].to_numpy()
-        ph_x_arr  = photons['x'].to_numpy()
-        ph_y_arr  = photons['y'].to_numpy()
-        ph_id_arr = photons['photon_id'].to_numpy()
+        claimed   = np.zeros(n_px, dtype=bool)
 
-        # Timepix3 coarse-clock-boundary artefact: EMPIR may correct ph/toa
-        # (+25 ns) while ExportedPixels.t remains uncorrected.  For those ~4%
-        # of photons the seed pixel sits 25 ns *before* ph_t and would be missed
-        # by a window starting at ph_t.  Looking back 25 ns catches them.
-        COARSE_CLOCK_S = 16 * 1.5625e-9   # 25 ns in seconds
-
-        def _best_subset(ph_t, ph_x, ph_y, exclude_mask, min_pix=None):
-            """Find the best-CoG subset for one photon given an exclusion mask."""
-            _min = min_pixels if min_pix is None else min_pix
-            best_dist = np.inf
-            best_idx  = None
-            for step_relax in relax_schedule:
-                search_time_s = base_time_s * step_relax
-                search_dist   = max_dist_px * step_relax
-                l = int(np.searchsorted(pix_t, ph_t - COARSE_CLOCK_S - TOL))
-                r = int(np.searchsorted(pix_t, ph_t + search_time_s + TOL, side='right'))
-                if r == l:
-                    continue
-                cands = np.arange(l, r)
-                cands = cands[~exclude_mask[cands]]
-                if len(cands) == 0:
-                    continue
-                dx = pix_x[cands] - ph_x
-                dy = pix_y[cands] - ph_y
-                cands = cands[dx * dx + dy * dy <= search_dist * search_dist]
-                if len(cands) == 0:
-                    continue
-                if len(cands) > MAX_CAND:
-                    dx = pix_x[cands] - ph_x
-                    dy = pix_y[cands] - ph_y
-                    cands = cands[np.argsort(dx * dx + dy * dy)[:MAX_CAND]]
-                n_c  = len(cands)
-                tots = pix_tot[cands].astype(np.float64)
-                wx   = pix_x[cands] * tots
-                wy   = pix_y[cands] * tots
-                masks  = np.arange(1, 1 << n_c, dtype=np.int32)
-                bits   = ((masks[:, None] >> np.arange(n_c, dtype=np.int32)) & 1).astype(np.float64)
-                valid  = bits.sum(axis=1) >= _min
-                if not valid.any():
-                    continue
-                tot_s  = bits @ tots
-                tot_s  = np.where(tot_s == 0, 1.0, tot_s)
-                # Use full-precision CoG — rounding is done in EMPIR on export,
-                # not during CoG computation, so raw float gives best ranking.
-                cx     = (bits @ wx) / tot_s
-                cy     = (bits @ wy) / tot_s
-                sq     = (cx - ph_x) ** 2 + (cy - ph_y) ** 2
-                sq     = np.where(valid, sq, np.inf)
-                bi     = int(np.argmin(sq))
-                dist   = float(np.sqrt(sq[bi]))
-                if dist < best_dist:
-                    best_dist = dist
-                    best_idx  = cands[bits[bi].astype(bool)]
-                if best_dist <= CONVERGE_DIST:
-                    break
-            return best_dist, best_idx
-
-        # ── Pass 1: find natural best match for every photon (no claiming) ────
-        _print_every = max(1, n_photons // 20)
-        if verbosity >= 1:
-            print(f"  Pass 1 — scoring photons ({n_photons:,})  ", end='', flush=True)
-
-        no_claims = np.zeros(n_px, dtype=bool)   # all False → nothing excluded
-        pass1 = []   # (best_dist, j, ph_id, ph_x, ph_y, ph_t, best_idx)
-        for j in range(n_photons):
-            if verbosity >= 1 and j % _print_every == 0:
-                print('.', end='', flush=True)
-            dist, idx = _best_subset(ph_t_arr[j], ph_x_arr[j], ph_y_arr[j], no_claims)
-            pass1.append((dist, j, ph_id_arr[j], ph_x_arr[j], ph_y_arr[j], ph_t_arr[j], idx))
-
-        if verbosity >= 1:
-            print()
-
-        # Sort by CoG distance ascending — best natural matches claim first
-        pass1.sort(key=lambda x: x[0])
-
-        # ── Pass 2: claim in priority order, re-search if pixels were taken ──
-        if verbosity >= 1:
-            print(f"  Pass 2 — claiming ({n_photons:,})  ", end='', flush=True)
-
-        com_quality = {'exact': 0, 'good': 0, 'acceptable': 0, 'poor': 0, 'failed': 0}
         assoc_id  = np.full(n_px, np.nan)
         assoc_x   = np.full(n_px, np.nan)
         assoc_y   = np.full(n_px, np.nan)
         assoc_t   = np.full(n_px, np.nan)
         assoc_com = np.full(n_px, np.nan)
-        claimed   = np.zeros(n_px, dtype=bool)
+        com_quality = {'exact': 0, 'good': 0, 'acceptable': 0, 'poor': 0, 'failed': 0}
 
-        for k, (dist1, j, ph_id, ph_x, ph_y, ph_t, idx1) in enumerate(pass1):
-            if verbosity >= 1 and k % _print_every == 0:
+        base_time_s   = max_time_ns / 1e9
+        time_schedule = [base_time_s * f for f in (1, 2, 4, 8)]
+
+        def _exact_subset(seed_i, cand_idx, ph_x, ph_y):
+            """
+            Find the smallest subset of cand_idx that, together with pixel
+            seed_i, yields a TOT-weighted centroid within COG_TOL of (ph_x, ph_y).
+            Returns list of chosen candidate indices into cand_idx, or None.
+            """
+            sx, sy, st = pix_x[seed_i], pix_y[seed_i], pix_tot[seed_i]
+            nc = min(len(cand_idx), MAX_CAND)
+            cx_arr = pix_x[cand_idx[:nc]]
+            cy_arr = pix_y[cand_idx[:nc]]
+            ct_arr = pix_tot[cand_idx[:nc]]
+
+            # Vectorised bitmask search for nc ≤ 20
+            masks  = np.arange(1 << nc, dtype=np.int64)          # shape (2^nc,)
+            bits   = ((masks[:, None] >> np.arange(nc)) & 1).astype(np.float64)
+            c_tot  = bits @ ct_arr                                # (2^nc,)
+            tot_s  = st + c_tot
+            tx_s   = sx * st + bits @ (cx_arr * ct_arr)
+            ty_s   = sy * st + bits @ (cy_arr * ct_arr)
+            ok     = tot_s > 0
+            cx_s   = np.where(ok, tx_s / np.where(ok, tot_s, 1.0), 1e9)
+            cy_s   = np.where(ok, ty_s / np.where(ok, tot_s, 1.0), 1e9)
+            match  = ok & (np.abs(cx_s - ph_x) < COG_TOL) & (np.abs(cy_s - ph_y) < COG_TOL)
+            if not match.any():
+                return None
+            # Among matches, prefer fewest additional pixels
+            hit = np.where(match)[0]
+            pop = np.array([bin(int(masks[h])).count('1') for h in hit])
+            best = hit[pop.argmin()]
+            chosen_mask = int(masks[best])
+            return [i for i in range(nc) if chosen_mask & (1 << i)]
+
+        _print_every = max(1, n_photons // 20)
+        if verbosity >= 1:
+            print(f"  EMPIR pixel association ({n_photons:,} photons)  ", end='', flush=True)
+
+        for ph_j in range(n_photons):
+            if verbosity >= 1 and ph_j % _print_every == 0:
                 print('.', end='', flush=True)
 
-            if idx1 is not None and not claimed[idx1].any():
-                # All Pass-1 pixels still available — claim as-is
-                best_idx  = idx1
-                best_dist = dist1
-            else:
-                # Some pixels taken — re-search with only unclaimed candidates
-                best_dist, best_idx = _best_subset(ph_t, ph_x, ph_y, claimed)
+            ph_t  = photons['t'].iloc[ph_j]
+            ph_x  = photons['x'].iloc[ph_j]
+            ph_y  = photons['y'].iloc[ph_j]
+            ph_id = photons['photon_id'].iloc[ph_j]
 
-            if best_idx is None:
-                # Fallback: try single-pixel match (min_pixels=1) for photons
-                # that couldn't form a cluster of the required minimum size.
-                if min_pixels > 1:
-                    best_dist, best_idx = _best_subset(ph_t, ph_x, ph_y, claimed, min_pix=1)
-                if best_idx is None:
-                    com_quality['failed'] += 1
-                    continue
-
-            if best_dist <= 1e-10:
-                com_quality['exact'] += 1
-            elif best_dist <= 0.2:
-                com_quality['good'] += 1
-            elif best_dist <= 0.5:
-                com_quality['acceptable'] += 1
-            elif best_dist <= max_dist_px:
-                com_quality['poor'] += 1
-            else:
+            # ── Step 1: seed pixel ────────────────────────────────────────────
+            # Primary: within ±½ tick of ph/toa
+            seed_mask = (~claimed) & (np.abs(pix_t - ph_t) < TICK_S * 0.5)
+            if not seed_mask.any():
+                # Fallback: coarse-clock-boundary artefact shifts pixel 25 ns early
+                seed_mask = (~claimed) & (np.abs(pix_t - (ph_t - COARSE_CLK_S)) < TICK_S * 0.5)
+            if not seed_mask.any():
                 com_quality['failed'] += 1
+                continue
 
-            claimed[best_idx]   = True
-            assoc_id[best_idx]  = ph_id
-            assoc_x[best_idx]   = ph_x
-            assoc_y[best_idx]   = ph_y
-            assoc_t[best_idx]   = ph_t
-            assoc_com[best_idx] = best_dist
+            seed_cands = np.where(seed_mask)[0]
+            seed_i = seed_cands[int(np.argmax(pix_tot[seed_cands]))]   # largest TOT
+
+            # ── Steps 2–4: find exact matching subset, relaxing time window ──
+            found = False
+            for window in time_schedule:
+                # Candidates: unclaimed, toa ≥ seed toa, within window and spatial radius
+                t0 = pix_t[seed_i]
+                cand_mask = (
+                    (~claimed) &
+                    (pix_t >= t0 - TICK_S * 0.5) &
+                    (pix_t <= ph_t + window) &
+                    (np.arange(n_px) != seed_i)
+                )
+                if max_dist_px < np.inf:
+                    ddx = pix_x - ph_x
+                    ddy = pix_y - ph_y
+                    cand_mask &= (ddx * ddx + ddy * ddy) <= max_dist_px ** 2
+                cand_idx = np.where(cand_mask)[0]
+
+                # Sort candidates by toa (time-order matching EMPIR)
+                cand_idx = cand_idx[np.argsort(pix_t[cand_idx])]
+
+                combo = _exact_subset(seed_i, cand_idx, ph_x, ph_y)
+                if combo is not None:
+                    members = np.array([seed_i] + [cand_idx[ci] for ci in combo])
+                    m_tot   = pix_tot[members]
+                    T       = m_tot.sum()
+                    cx      = (pix_x[members] * m_tot).sum() / T
+                    cy      = (pix_y[members] * m_tot).sum() / T
+                    dist    = float(np.sqrt((cx - ph_x) ** 2 + (cy - ph_y) ** 2))
+
+                    claimed[members]   = True
+                    assoc_id[members]  = ph_id
+                    assoc_x[members]   = ph_x
+                    assoc_y[members]   = ph_y
+                    assoc_t[members]   = ph_t
+                    assoc_com[members] = dist
+
+                    if dist <= 1e-6:
+                        com_quality['exact'] += 1
+                    elif dist <= 0.2:
+                        com_quality['good'] += 1
+                    elif dist <= 0.5:
+                        com_quality['acceptable'] += 1
+                    elif dist <= max_dist_px:
+                        com_quality['poor'] += 1
+                    else:
+                        com_quality['failed'] += 1
+                    found = True
+                    break
+
+            if not found:
+                # Last resort: claim just the seed
+                claimed[seed_i]   = True
+                assoc_id[seed_i]  = ph_id
+                assoc_x[seed_i]   = ph_x
+                assoc_y[seed_i]   = ph_y
+                assoc_t[seed_i]   = ph_t
+                assoc_com[seed_i] = float(np.sqrt((pix_x[seed_i] - ph_x) ** 2 +
+                                                   (pix_y[seed_i] - ph_y) ** 2))
+                com_quality['failed'] += 1
 
         if verbosity >= 1:
             print()
