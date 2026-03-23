@@ -2692,7 +2692,8 @@ def build_combined(run_dir, archive, suffix='', sim_cols=None, verbose=False):
     # ── step 2: AssociatedResults → TracedPhotons ─────────────────────────────
     _id_col = 'sim_id' if 'sim_id' in trace_with_sim.columns else 'id'
     TRACE_CARRY = [_id_col]
-    for _c in ['neutron_id', 'pulse_id', 'pulse_time_ns', 'pixel_x', 'pixel_y', 'toa2']:
+    for _c in ['neutron_id', 'pulse_id', 'pulse_time_ns',
+               'pixel_x', 'pixel_y', 'toa2', 'coarse_clock_wrap']:
         if _c in trace_with_sim.columns:
             TRACE_CARRY.append(_c)
     for _c in keep_sim:
@@ -2795,5 +2796,7 @@ def build_combined(run_dir, archive, suffix='', sim_cols=None, verbose=False):
     _rename = {c: f'sim/{c}' for c in combined.columns if c in _sim_src}
     _rename['sim_id'] = 'sim/id'
     combined = combined.rename(columns=_rename)
+    if 'coarse_clock_wrap' in combined.columns:
+        combined = combined.rename(columns={'coarse_clock_wrap': 'sim/ccw'})
 
     return combined
