@@ -1383,11 +1383,12 @@ class Analyse:
         n_photons = len(photons)
         claimed   = np.zeros(n_px, dtype=bool)
 
-        assoc_id  = np.full(n_px, np.nan)
-        assoc_x   = np.full(n_px, np.nan)
-        assoc_y   = np.full(n_px, np.nan)
-        assoc_t   = np.full(n_px, np.nan)
-        assoc_com = np.full(n_px, np.nan)
+        assoc_id      = np.full(n_px, np.nan)
+        assoc_x       = np.full(n_px, np.nan)
+        assoc_y       = np.full(n_px, np.nan)
+        assoc_t       = np.full(n_px, np.nan)
+        assoc_com     = np.full(n_px, np.nan)
+        assoc_toa_off = np.full(n_px, np.nan)   # seed TOA offset vs ph/toa in ns
         com_quality = {'exact': 0, 'good': 0, 'acceptable': 0, 'poor': 0, 'failed': 0}
 
         base_time_s = max_time_ns / 1e9
@@ -1490,7 +1491,8 @@ class Analyse:
             #   −25 ns  — EMPIR coarse-clock artefact: pixel TOA shifted 25 ns early
             #   +25 ns  — OOB seed missing; next in-bounds pixel is 25 ns later
             #   ±50 ns  — double coarse-clock stack (rare)
-            seed_i = None
+            seed_i      = None
+            seed_off_ns = 0.0
             for _toa_offset in (0, -COARSE_CLK_S, COARSE_CLK_S,
                                   -2 * COARSE_CLK_S, 2 * COARSE_CLK_S):
                 t_seed = ph_t + _toa_offset
@@ -1507,7 +1509,8 @@ class Analyse:
                 sc = sc[dx * dx + dy * dy <= r2_max]
                 if len(sc) == 0:
                     continue
-                seed_i = int(sc[np.argmax(pix_tot[sc])])
+                seed_i      = int(sc[np.argmax(pix_tot[sc])])
+                seed_off_ns = round(_toa_offset * 1e9)   # 0, ±25, ±50 ns
                 break
 
             if seed_i is None:
@@ -1548,12 +1551,13 @@ class Analyse:
                 combo, l1 = _exact_subset(seed_i, cand_idx, ph_x, ph_y)
                 if combo is not None:
                     members = np.array([seed_i] + [cand_idx[ci] for ci in combo])
-                    claimed[members]   = True
-                    assoc_id[members]  = ph_id
-                    assoc_x[members]   = ph_x
-                    assoc_y[members]   = ph_y
-                    assoc_t[members]   = ph_t
-                    assoc_com[members] = l1
+                    claimed[members]       = True
+                    assoc_id[members]      = ph_id
+                    assoc_x[members]       = ph_x
+                    assoc_y[members]       = ph_y
+                    assoc_t[members]       = ph_t
+                    assoc_com[members]     = l1
+                    assoc_toa_off[members] = seed_off_ns
                     if l1 < 1e-6:       com_quality['exact'] += 1
                     elif l1 < 0.005:    com_quality['good'] += 1
                     elif l1 < 0.01:     com_quality['acceptable'] += 1
@@ -1564,22 +1568,24 @@ class Analyse:
             if not found:
                 combo_opt, l1_opt = _optim_subset(seed_i, last_cand, ph_x, ph_y)
                 members = np.array([seed_i] + [last_cand[ci] for ci in combo_opt])
-                claimed[members]   = True
-                assoc_id[members]  = ph_id
-                assoc_x[members]   = ph_x
-                assoc_y[members]   = ph_y
-                assoc_t[members]   = ph_t
-                assoc_com[members] = l1_opt
+                claimed[members]       = True
+                assoc_id[members]      = ph_id
+                assoc_x[members]       = ph_x
+                assoc_y[members]       = ph_y
+                assoc_t[members]       = ph_t
+                assoc_com[members]     = l1_opt
+                assoc_toa_off[members] = seed_off_ns
                 com_quality['failed'] += 1
 
         if verbosity >= 1:
             print()
 
-        pixels['assoc_photon_id'] = assoc_id
-        pixels['assoc_phot_x']    = assoc_x
-        pixels['assoc_phot_y']    = assoc_y
-        pixels['assoc_phot_t']    = assoc_t
-        pixels['pixel_com_dist']  = assoc_com
+        pixels['assoc_photon_id']    = assoc_id
+        pixels['assoc_phot_x']       = assoc_x
+        pixels['assoc_phot_y']       = assoc_y
+        pixels['assoc_phot_t']       = assoc_t
+        pixels['pixel_com_dist']     = assoc_com
+        pixels['seed_toa_offset_ns'] = assoc_toa_off
 
         self._store_pixel_photon_stats(pixels, photons, com_quality, verbosity)
         return pixels
@@ -2213,7 +2219,7 @@ class Analyse:
             'x': 'px/x', 'y': 'px/y', 't': 'px/toa', 'tot': 'px/tot', 'tof': 'px/tof',
             'assoc_photon_id': 'ph/id',
             'assoc_phot_x': 'ph/x', 'assoc_phot_y': 'ph/y', 'assoc_phot_t': 'ph/toa',
-            'pixel_com_dist': 'ph/cog',
+            'pixel_com_dist': 'ph/cog', 'seed_toa_offset_ns': 'ph/seed_dt_ns',
             'assoc_event_id': 'ev/id',
             'assoc_x': 'ev/x', 'assoc_y': 'ev/y', 'assoc_t': 'ev/toa',
             'assoc_n': 'ev/n', 'assoc_PSD': 'ev/psd', 'assoc_com_dist': 'ev/cog',
@@ -2235,7 +2241,8 @@ class Analyse:
         has_pixel = 'tot' in df.columns or 'assoc_photon_id' in df.columns
         rename = {
             'assoc_photon_id': 'ph/id', 'assoc_phot_x': 'ph/x',
-            'assoc_phot_y': 'ph/y', 'assoc_phot_t': 'ph/toa', 'pixel_com_dist': 'ph/cog',
+            'assoc_phot_y': 'ph/y', 'assoc_phot_t': 'ph/toa',
+            'pixel_com_dist': 'ph/cog', 'seed_toa_offset_ns': 'ph/seed_dt_ns',
             'assoc_event_id': 'ev/id', 'assoc_cluster_id': 'ev/id',
             'assoc_x': 'ev/x', 'assoc_y': 'ev/y', 'assoc_t': 'ev/toa',
             'assoc_n': 'ev/n', 'assoc_PSD': 'ev/psd', 'assoc_com_dist': 'ev/cog',
