@@ -73,7 +73,9 @@
       "Bash(find /work/nuclear/PTB/data/PTB2024/ -path */TracedPhotons/*.csv)",
       "Bash(find /work/nuclear/G4LumaCam/ -path */TracedPhotons/*.csv)",
       "Bash(find /work/nuclear/PTB/ -name traced_sim_data_*.csv)",
-      "Bash(~/.local/bin/micromamba run:*)"
+      "Bash(~/.local/bin/micromamba run:*)",
+      "Read(//work/nuclear/G4LumaCam/notebooks/archive/openbeam_ptb_5e6/in_focus/TracedPhotons/**)",
+      "Read(//work/nuclear/G4LumaCam/notebooks/archive/openbeam_ptb_5e6/TracedPhotons/**)"
     ]
   }
 }

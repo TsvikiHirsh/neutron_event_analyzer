@@ -1,3 +1,4 @@
+import gc
 import os
 import glob
 import pandas as pd
@@ -2610,18 +2611,29 @@ def build_combined(run_dir, archive, suffix='', sim_cols=None, verbose=False):
         )
 
     # ── load files pairwise, tagging each row with its file index ─────────────
+    # Read only the SimPhotons columns we actually need — avoids loading all 22
+    # sim columns into memory when only ~8 are ever used.
+    _first_sim = pd.read_csv(sim_files[0], comment='#', nrows=0)
+    _sim_keep  = ['_file_id', 'id', 'pulse_id'] + [c for c in sim_cols or _DEFAULT_SIM_COLS
+                                                    if c in _first_sim.columns and c not in ('id', 'pulse_id')]
+    del _first_sim
+
     trace_parts = []
     sim_parts   = []
     for file_id, (tf, sf) in enumerate(zip(trace_files, sim_files)):
         t = pd.read_csv(tf, comment='#')
-        s = pd.read_csv(sf, comment='#')
+        s = pd.read_csv(sf, comment='#', usecols=[c for c in _sim_keep if c != '_file_id'])
         t['_file_id'] = file_id
         s['_file_id'] = file_id
         trace_parts.append(t)
         sim_parts.append(s)
 
     trace = pd.concat(trace_parts, ignore_index=True)
+    del trace_parts
     sim   = pd.concat(sim_parts,   ignore_index=True)
+    del sim_parts
+    gc.collect()
+
     assoc = pd.read_csv(assoc_path)
     # Drop any sim/* columns from a previous merge run to avoid .1 duplicates
     assoc = assoc.drop(columns=[c for c in assoc.columns if c.startswith('sim/')],
@@ -2661,6 +2673,9 @@ def build_combined(run_dir, archive, suffix='', sim_cols=None, verbose=False):
         how='left',
         suffixes=('', '_sim'),
     )
+    del trace, sim, sim_slim
+    gc.collect()
+
     # Drop any _sim-suffixed duplicate column (pulse_id_sim etc.)
     _dup_cols = [c for c in trace_with_sim.columns if c.endswith('_sim')]
     if _dup_cols:
@@ -2687,16 +2702,27 @@ def build_combined(run_dir, archive, suffix='', sim_cols=None, verbose=False):
         if _c not in TRACE_CARRY and _c in trace_with_sim.columns:
             TRACE_CARRY.append(_c)
 
+    # Slim trace_with_sim to only TRACE_CARRY columns before building the join
+    # index — avoids keeping all simulation columns in memory during the join.
+    _tws_cols = [c for c in TRACE_CARRY if c in trace_with_sim.columns]
+    if 'in_tpx3' in trace_with_sim.columns:
+        _tws_cols = ['in_tpx3'] + [c for c in _tws_cols if c != 'in_tpx3']
+    if 'pixel_id' in trace_with_sim.columns and 'pixel_id' not in _tws_cols:
+        _tws_cols = ['pixel_id'] + _tws_cols
+    trace_with_sim = trace_with_sim[_tws_cols].copy()
+    gc.collect()
+
     if 'pixel_id' in trace_with_sim.columns:
         # ── fast path: pixel_id is the row index of ExportedPixels / AssociatedResults
         trace_idx = (
             trace_with_sim
             .dropna(subset=['pixel_id'])
             .set_index('pixel_id')
-            [TRACE_CARRY]
+            [[c for c in TRACE_CARRY if c in trace_with_sim.columns]]
             .rename(columns={_id_col: 'sim_id'})
         )
         trace_idx.index = trace_idx.index.astype(int)
+        del trace_with_sim; gc.collect()
         combined = assoc.join(trace_idx, how='left')
     else:
         # ── fallback: coordinate + TOA lookup (works at ~96 % for unmodified data)
@@ -2713,6 +2739,7 @@ def build_combined(run_dir, archive, suffix='', sim_cols=None, verbose=False):
         _tws = _trace_for_lookup.assign(
             _toa_key=(_trace_for_lookup['toa2'] / TICK).round().astype('int64'),
         )
+        del trace_with_sim, _trace_for_lookup; gc.collect()
         # pixel_x/pixel_y are the index keys here, exclude from value columns
         _carry_vals = [c for c in TRACE_CARRY if c not in ('pixel_x', 'pixel_y')]
         trace_idx = (
@@ -2722,6 +2749,7 @@ def build_combined(run_dir, archive, suffix='', sim_cols=None, verbose=False):
             [_carry_vals]
             .rename(columns={_id_col: 'sim_id'})
         )
+        del _tws; gc.collect()
         assoc = assoc.copy()
         assoc['_px_x']    = assoc['px/x'].astype(int)
         assoc['_px_y']    = assoc['px/y'].astype(int)
@@ -2755,6 +2783,7 @@ def build_combined(run_dir, archive, suffix='', sim_cols=None, verbose=False):
         combined['pixel_x'] = combined['_px_x'].where(_sim_matched)
         combined['pixel_y'] = combined['_px_y'].where(_sim_matched)
         combined.drop(columns=['_px_x', '_px_y', '_toa_key'], inplace=True)
+        del trace_idx; gc.collect()
 
     if verbose:
         n_total   = len(combined)
