@@ -1346,8 +1346,8 @@ class Analyse:
 
         TICK_S        = 1.5625e-9          # Timepix3 clock tick in seconds
         COARSE_CLK_S  = 16 * TICK_S        # 25 ns coarse-clock-boundary offset
-        COG_TOL       = 0.005              # centroid tolerance: 2 decimal places
-        MAX_CAND      = 20                 # hard cap on candidates for exact search
+        COG_TOL       = 0.03               # L1 centroid tolerance (|Δx|+|Δy|)
+        MAX_CAND      = 15                 # bitmask cap: 2^15 = 32 K subsets per call
 
         if pixels_df is None or photons_df is None or len(pixels_df) == 0 or len(photons_df) == 0:
             return pixels_df
@@ -1381,8 +1381,11 @@ class Analyse:
         assoc_com = np.full(n_px, np.nan)
         com_quality = {'exact': 0, 'good': 0, 'acceptable': 0, 'poor': 0, 'failed': 0}
 
-        base_time_s   = max_time_ns / 1e9
-        time_schedule = [base_time_s * f for f in (1, 2, 4, 8)]
+        base_time_s = max_time_ns / 1e9
+        # Each attempt widens the time window only; spatial radius stays fixed
+        # (EMPIR uses a fixed dSpace — expanding it pulls in unrelated pixels).
+        # Tuples are (time_multiplier, radius_multiplier).
+        search_schedule = [(1, 1), (2, 1), (4, 1), (8, 1)]
 
         def _bitmask_l1(sx, sy, st, cx_arr, cy_arr, ct_arr, nc, target_x, target_y):
             """
@@ -1451,9 +1454,11 @@ class Analyse:
 
         def _optim_subset(seed_i, cand_idx, ph_x, ph_y):
             """
-            Optimization fallback: no window yielded an exact CoG match.
-            Minimise L1 CoG error over all 2^nc subsets — globally optimal
-            assignment for these candidates even if it cannot reach COG_TOL.
+            Optimization fallback: no window yielded a CoG match within COG_TOL.
+            Runs the full bitmask (capped at MAX_CAND=15 → 32 K subsets) and
+            returns the subset with minimum L1 — globally optimal for these
+            candidates.  Only called for the small fraction of failed photons
+            so the extra 32 K ops per photon is negligible overall.
             Returns (chosen_candidate_indices, l1_value).
             """
             sx, sy, st = pix_x[seed_i], pix_y[seed_i], pix_tot[seed_i]
@@ -1483,19 +1488,26 @@ class Analyse:
             ph_id = photons['photon_id'].iloc[ph_j]
 
             # ── Step 1: seed pixel ────────────────────────────────────────────
-            # Primary: within ±½ tick of ph/toa AND within spatial radius.
-            # The spatial guard prevents a photon from a different cluster
-            # stealing a seed pixel that merely shares its TOA.
+            # Spatial guard: prevents a photon from a different cluster stealing
+            # a seed pixel that merely shares its TOA.
             ddx_all = pix_x - ph_x
             ddy_all = pix_y - ph_y
             if max_dist_px < np.inf:
                 near = (ddx_all * ddx_all + ddy_all * ddy_all) <= max_dist_px ** 2
             else:
                 near = np.ones(n_px, dtype=bool)
-            seed_mask = (~claimed) & near & (np.abs(pix_t - ph_t) < TICK_S * 0.5)
-            if not seed_mask.any():
-                # Fallback: coarse-clock-boundary artefact shifts pixel 25 ns early
-                seed_mask = (~claimed) & near & (np.abs(pix_t - (ph_t - COARSE_CLK_S)) < TICK_S * 0.5)
+
+            # Seed TOA offsets tried in priority order:
+            #   0       — exact match (most common)
+            #   −25 ns  — EMPIR coarse-clock artefact: pixel TOA shifted 25 ns early
+            #   +25 ns  — OOB seed missing; next valid in-bounds pixel is 25 ns later
+            #   ±50 ns  — double coarse-clock stack (rare edge case)
+            _half_tick = TICK_S * 0.5
+            for _toa_offset in (0, -COARSE_CLK_S, COARSE_CLK_S,
+                                 -2 * COARSE_CLK_S, 2 * COARSE_CLK_S):
+                seed_mask = (~claimed) & near & (np.abs(pix_t - (ph_t + _toa_offset)) < _half_tick)
+                if seed_mask.any():
+                    break
             if not seed_mask.any():
                 com_quality['failed'] += 1
                 continue
@@ -1503,12 +1515,16 @@ class Analyse:
             seed_cands = np.where(seed_mask)[0]
             seed_i = seed_cands[int(np.argmax(pix_tot[seed_cands]))]   # largest TOT
 
-            # ── Steps 2–4: find exact matching subset, relaxing time window ──
-            found     = False
-            last_cand = np.empty(0, dtype=np.intp)  # widest window candidates seen
+            # ── Steps 2–4: exact search with widening time window ─────────────
+            found      = False
+            last_cand  = np.empty(0, dtype=np.intp)
+            prev_n_cand = -1   # skip bitmask when candidate count hasn't changed
 
-            for window in time_schedule:
-                # Candidates: unclaimed, toa ≥ seed toa, within window and spatial radius
+            for time_mult, radius_mult in search_schedule:
+                window = base_time_s * time_mult
+                cand_r = max_dist_px * radius_mult
+
+                # Candidates: unclaimed, toa ≥ seed toa, within window and radius
                 t0 = pix_t[seed_i]
                 cand_mask = (
                     (~claimed) &
@@ -1516,13 +1532,19 @@ class Analyse:
                     (pix_t <= ph_t + window) &
                     (np.arange(n_px) != seed_i)
                 )
-                if max_dist_px < np.inf:
-                    cand_mask &= near  # reuse spatial mask computed above
+                if cand_r < np.inf:
+                    cand_mask &= (ddx_all * ddx_all + ddy_all * ddy_all) <= cand_r ** 2
                 cand_idx = np.where(cand_mask)[0]
+
+                # Skip this step if the candidate set is the same as the last one
+                # (wider time window brought no new pixels — bitmask would give same result)
+                if len(cand_idx) == prev_n_cand:
+                    continue
+                prev_n_cand = len(cand_idx)
 
                 # Sort candidates by toa (time-order matching EMPIR)
                 cand_idx = cand_idx[np.argsort(pix_t[cand_idx])]
-                last_cand = cand_idx   # remember widest window for opt fallback
+                last_cand = cand_idx   # remember widest non-duplicate set for fallback
 
                 combo, l1 = _exact_subset(seed_i, cand_idx, ph_x, ph_y)
                 if combo is not None:
@@ -1539,16 +1561,14 @@ class Analyse:
                     assoc_t[members]   = ph_t
                     assoc_com[members] = cog_l1
 
-                    if cog_l1 <= 1e-6:
+                    if cog_l1 < 1e-6:
                         com_quality['exact'] += 1
-                    elif cog_l1 <= 0.01:
+                    elif cog_l1 < 0.005:
                         com_quality['good'] += 1
-                    elif cog_l1 <= 0.05:
+                    elif cog_l1 < 0.01:
                         com_quality['acceptable'] += 1
-                    elif cog_l1 < COG_TOL:
+                    else:                          # < COG_TOL (0.03) by construction
                         com_quality['poor'] += 1
-                    else:
-                        com_quality['failed'] += 1
                     found = True
                     break
 
