@@ -1337,8 +1337,9 @@ class Analyse:
           2. Candidates — unclaimed pixels with toa ≥ seed toa, within the
                      current time window and max_dist_px of (ph/x, ph/y).
           3. Exact search — enumerate subsets of candidates (seed always
-                     included) in order of increasing size until the TOT-weighted
-                     centroid matches (ph/x, ph/y) to 2 decimal places (< 0.005).
+                     included); first tries the full candidate set, then picks
+                     the largest subset whose TOT-weighted centroid matches
+                     (ph/x, ph/y) to 2 decimal places (< 0.005).
           4. Relax — if not found, double the time window and retry (up to 4×).
         """
         import itertools
@@ -1385,9 +1386,11 @@ class Analyse:
 
         def _exact_subset(seed_i, cand_idx, ph_x, ph_y):
             """
-            Find the smallest subset of cand_idx that, together with pixel
-            seed_i, yields a TOT-weighted centroid within COG_TOL of (ph_x, ph_y).
+            Find the subset of cand_idx that, together with pixel seed_i,
+            yields a TOT-weighted centroid within COG_TOL of (ph_x, ph_y).
             Returns list of chosen candidate indices into cand_idx, or None.
+            Enumerates all subsets via bitmask; prefers the smallest matching
+            subset (minimum extra pixels beyond the seed).
             """
             sx, sy, st = pix_x[seed_i], pix_y[seed_i], pix_tot[seed_i]
             nc = min(len(cand_idx), MAX_CAND)
@@ -1395,7 +1398,7 @@ class Analyse:
             cy_arr = pix_y[cand_idx[:nc]]
             ct_arr = pix_tot[cand_idx[:nc]]
 
-            # Vectorised bitmask search for nc ≤ 20
+            # Vectorised bitmask search for nc ≤ MAX_CAND
             masks  = np.arange(1 << nc, dtype=np.int64)          # shape (2^nc,)
             bits   = ((masks[:, None] >> np.arange(nc)) & 1).astype(np.float64)
             c_tot  = bits @ ct_arr                                # (2^nc,)
@@ -1429,11 +1432,19 @@ class Analyse:
             ph_id = photons['photon_id'].iloc[ph_j]
 
             # ── Step 1: seed pixel ────────────────────────────────────────────
-            # Primary: within ±½ tick of ph/toa
-            seed_mask = (~claimed) & (np.abs(pix_t - ph_t) < TICK_S * 0.5)
+            # Primary: within ±½ tick of ph/toa AND within spatial radius.
+            # The spatial guard prevents a photon from a different cluster
+            # stealing a seed pixel that merely shares its TOA.
+            ddx_all = pix_x - ph_x
+            ddy_all = pix_y - ph_y
+            if max_dist_px < np.inf:
+                near = (ddx_all * ddx_all + ddy_all * ddy_all) <= max_dist_px ** 2
+            else:
+                near = np.ones(n_px, dtype=bool)
+            seed_mask = (~claimed) & near & (np.abs(pix_t - ph_t) < TICK_S * 0.5)
             if not seed_mask.any():
                 # Fallback: coarse-clock-boundary artefact shifts pixel 25 ns early
-                seed_mask = (~claimed) & (np.abs(pix_t - (ph_t - COARSE_CLK_S)) < TICK_S * 0.5)
+                seed_mask = (~claimed) & near & (np.abs(pix_t - (ph_t - COARSE_CLK_S)) < TICK_S * 0.5)
             if not seed_mask.any():
                 com_quality['failed'] += 1
                 continue
@@ -1453,9 +1464,7 @@ class Analyse:
                     (np.arange(n_px) != seed_i)
                 )
                 if max_dist_px < np.inf:
-                    ddx = pix_x - ph_x
-                    ddy = pix_y - ph_y
-                    cand_mask &= (ddx * ddx + ddy * ddy) <= max_dist_px ** 2
+                    cand_mask &= near  # reuse spatial mask computed above
                 cand_idx = np.where(cand_mask)[0]
 
                 # Sort candidates by toa (time-order matching EMPIR)
@@ -2625,8 +2634,15 @@ def build_combined(run_dir, archive, suffix='', sim_cols=None, verbose=False):
         # Join key: (int(px/x), int(px/y), round(px/toa_ns / TICK))
         #        == (pixel_x,   pixel_y,   round(toa2       / TICK))
         TICK = 1.5625  # ns — Timepix3 clock period
-        _tws = trace_with_sim.assign(
-            _toa_key=(trace_with_sim['toa2'] / TICK).round().astype('int64'),
+        # Only use pixels that were actually written to the TPX3 file.
+        # OOB pixels (pixel_x/y outside [0,255]) are dropped by G4LumaCam's
+        # _write_tpx3 and therefore absent from ExportedPixels; including them
+        # in the lookup index only wastes time and can cause duplicate-key issues.
+        _trace_for_lookup = trace_with_sim
+        if 'in_tpx3' in trace_with_sim.columns:
+            _trace_for_lookup = trace_with_sim[trace_with_sim['in_tpx3'].astype(bool)]
+        _tws = _trace_for_lookup.assign(
+            _toa_key=(_trace_for_lookup['toa2'] / TICK).round().astype('int64'),
         )
         # pixel_x/pixel_y are the index keys here, exclude from value columns
         _carry_vals = [c for c in TRACE_CARRY if c not in ('pixel_x', 'pixel_y')]
