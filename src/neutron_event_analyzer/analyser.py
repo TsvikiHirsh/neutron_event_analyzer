@@ -1338,19 +1338,28 @@ class Analyse:
                      current time window and max_dist_px of (ph/x, ph/y).
           3. Exact search — enumerate subsets of candidates (seed always
                      included); first tries the full candidate set, then picks
-                     the largest subset whose TOT-weighted centroid matches
-                     (ph/x, ph/y) to 2 decimal places (< 0.005).
-          4. Relax — if not found, double the time window and retry (up to 4×).
+                     the largest subset whose TOT-weighted L1 centroid error
+                     is below COG_TOL.
+          4. Relax — if not found, widen the time window and retry (up to 8×).
         """
-        import itertools
-
-        TICK_S        = 1.5625e-9          # Timepix3 clock tick in seconds
-        COARSE_CLK_S  = 16 * TICK_S        # 25 ns coarse-clock-boundary offset
-        COG_TOL       = 0.03               # L1 centroid tolerance (|Δx|+|Δy|)
-        MAX_CAND      = 15                 # bitmask cap: 2^15 = 32 K subsets per call
+        TICK_S       = 1.5625e-9           # Timepix3 clock tick in seconds
+        COARSE_CLK_S = 16 * TICK_S         # 25 ns coarse-clock-boundary offset
+        HALF_TICK    = TICK_S * 0.5
+        COG_TOL      = 0.03                # L1 centroid tolerance (|Δx|+|Δy|)
+        MAX_CAND     = 15                  # bitmask cap: 2^15 = 32 K subsets
+        MAX_OPT_CAND = 8                   # bitmask cap for fallback: 2^8 = 256
 
         if pixels_df is None or photons_df is None or len(pixels_df) == 0 or len(photons_df) == 0:
             return pixels_df
+
+        # The bit-matrix ops are small (≤32767 rows × ≤15 cols).
+        # BLAS worker threads spend more time on lock overhead than computation.
+        # Permanently set to 1 thread — restoring re-spins OpenBLAS (~9 s overhead).
+        try:
+            import threadpoolctl as _tpc
+            _tpc.threadpool_limits(limits=1)
+        except ImportError:
+            pass
 
         pixels  = pixels_df.copy()
         photons = photons_df.copy()
@@ -1367,8 +1376,8 @@ class Analyse:
         pix_t   = pixels['t'].to_numpy()
         pix_x   = pixels['x'].to_numpy()
         pix_y   = pixels['y'].to_numpy()
-        pix_tot = (pixels['tot'].to_numpy().astype(float)
-                   if 'tot' in pixels.columns else np.ones(len(pixels)))
+        pix_tot = (pixels['tot'].to_numpy().astype(np.float32)
+                   if 'tot' in pixels.columns else np.ones(len(pixels), dtype=np.float32))
 
         n_px      = len(pixels)
         n_photons = len(photons)
@@ -1382,19 +1391,21 @@ class Analyse:
         com_quality = {'exact': 0, 'good': 0, 'acceptable': 0, 'poor': 0, 'failed': 0}
 
         base_time_s = max_time_ns / 1e9
-        # Each attempt widens the time window only; spatial radius stays fixed
-        # (EMPIR uses a fixed dSpace — expanding it pulls in unrelated pixels).
-        # Tuples are (time_multiplier, radius_multiplier).
+        # Time window widens each step; spatial radius stays fixed.
         search_schedule = [(1, 1), (2, 1), (4, 1), (8, 1)]
 
+        # Pre-extract photon arrays to avoid pandas row-access overhead in the loop
+        ph_t_arr  = photons['t'].to_numpy()
+        ph_x_arr  = photons['x'].to_numpy()
+        ph_y_arr  = photons['y'].to_numpy()
+        ph_id_arr = photons['photon_id'].to_numpy()
+
+        r2_max = max_dist_px * max_dist_px
+
         def _bitmask_l1(sx, sy, st, cx_arr, cy_arr, ct_arr, nc, target_x, target_y):
-            """
-            Compute L1 CoG error and popcount for every bitmask subset.
-            Seed pixel: (sx, sy, st).  Candidate arrays: cx/cy/ct of length nc.
-            Returns (masks, l1, pop) arrays of length 2^nc.
-            """
-            masks = np.arange(1 << nc, dtype=np.int64)
-            bits  = ((masks[:, None] >> np.arange(nc)) & 1).astype(np.float64)
+            """L1 CoG error + popcount for every bitmask subset (float32, 2^nc rows)."""
+            masks = np.arange(1 << nc, dtype=np.int32)
+            bits  = ((masks[:, None] >> np.arange(nc, dtype=np.int32)) & 1).astype(np.float32)
             c_tot = bits @ ct_arr
             tot_s = st + c_tot
             ok    = tot_s > 0
@@ -1408,71 +1419,56 @@ class Analyse:
 
         def _exact_subset(seed_i, cand_idx, ph_x, ph_y):
             """
-            Find the subset of cand_idx (+ seed_i) with L1 CoG error < COG_TOL.
-
-            Strategy — argmax (claim as many pixels as possible):
-              1. Fast path: if the FULL candidate set gives L1 < COG_TOL, return
-                 all candidates immediately.
-              2. Bitmask: enumerate all 2^nc subsets; among those with L1 < COG_TOL
-                 return the one with the most pixels (argmax popcount).
-
-            Returns (chosen_candidate_indices, l1_value) or (None, best_l1).
-            best_l1 is the minimum L1 found across all subsets (used by the
-            optimization fallback when no window yields an exact match).
+            Find the largest subset of cand_idx (seed always included) with L1 < COG_TOL.
+            Fast path: try full set first.  Falls back to bitmask argmax-popcount.
+            Returns (chosen_cand_indices, l1) or (None, best_l1).
             """
-            sx, sy, st = pix_x[seed_i], pix_y[seed_i], pix_tot[seed_i]
+            sx = pix_x[seed_i]; sy = pix_y[seed_i]; st = pix_tot[seed_i]
             nc = min(len(cand_idx), MAX_CAND)
             if nc == 0:
                 return None, abs(sx - ph_x) + abs(sy - ph_y)
-
             cx_arr = pix_x[cand_idx[:nc]]
             cy_arr = pix_y[cand_idx[:nc]]
             ct_arr = pix_tot[cand_idx[:nc]]
-
-            # ── Fast path: argmax — try the full candidate set first ────────────
+            # Fast path — full set
             tot_full = st + ct_arr.sum()
             if tot_full > 0:
-                cx_full = (sx * st + (cx_arr * ct_arr).sum()) / tot_full
-                cy_full = (sy * st + (cy_arr * ct_arr).sum()) / tot_full
-                l1_full = abs(cx_full - ph_x) + abs(cy_full - ph_y)
+                l1_full = (abs((sx * st + (cx_arr * ct_arr).sum()) / tot_full - ph_x)
+                         + abs((sy * st + (cy_arr * ct_arr).sum()) / tot_full - ph_y))
                 if l1_full < COG_TOL:
-                    return list(range(nc)), l1_full   # all candidates — easy case
-
-            # ── Bitmask: enumerate all 2^nc subsets with L1 metric ──────────────
-            masks, l1, pop = _bitmask_l1(sx, sy, st, cx_arr, cy_arr, ct_arr, nc,
-                                         ph_x, ph_y)
+                    return list(range(nc)), float(l1_full)
+            # Bitmask
+            masks, l1, pop = _bitmask_l1(sx, sy, st, cx_arr, cy_arr, ct_arr, nc, ph_x, ph_y)
             best_l1 = float(l1.min())
             match   = l1 < COG_TOL
             if not match.any():
                 return None, best_l1
-
-            # Among exact matches, prefer the largest subset (argmax popcount)
             hit  = np.where(match)[0]
             best = hit[pop[hit].argmax()]
-            chosen_mask = int(masks[best])
-            return [i for i in range(nc) if chosen_mask & (1 << i)], float(l1[best])
+            return [i for i in range(nc) if int(masks[best]) & (1 << i)], float(l1[best])
 
         def _optim_subset(seed_i, cand_idx, ph_x, ph_y):
             """
-            Optimization fallback: no window yielded a CoG match within COG_TOL.
-            Runs the full bitmask (capped at MAX_CAND=15 → 32 K subsets) and
-            returns the subset with minimum L1 — globally optimal for these
-            candidates.  Only called for the small fraction of failed photons
-            so the extra 32 K ops per photon is negligible overall.
-            Returns (chosen_candidate_indices, l1_value).
+            Fallback: claim the subset with minimum L1 (bitmask ≤ MAX_OPT_CAND,
+            full-set fast path if more candidates to avoid hangs).
             """
-            sx, sy, st = pix_x[seed_i], pix_y[seed_i], pix_tot[seed_i]
+            sx = pix_x[seed_i]; sy = pix_y[seed_i]; st = pix_tot[seed_i]
             nc = min(len(cand_idx), MAX_CAND)
             if nc == 0:
                 return [], abs(sx - ph_x) + abs(sy - ph_y)
             cx_arr = pix_x[cand_idx[:nc]]
             cy_arr = pix_y[cand_idx[:nc]]
             ct_arr = pix_tot[cand_idx[:nc]]
-            masks, l1, pop = _bitmask_l1(sx, sy, st, cx_arr, cy_arr, ct_arr, nc,
-                                         ph_x, ph_y)
+            if nc > MAX_OPT_CAND:
+                tot_full = st + ct_arr.sum()
+                if tot_full > 0:
+                    return list(range(nc)), (
+                        abs((sx * st + (cx_arr * ct_arr).sum()) / tot_full - ph_x)
+                      + abs((sy * st + (cy_arr * ct_arr).sum()) / tot_full - ph_y))
+                return [], abs(sx - ph_x) + abs(sy - ph_y)
+            masks, l1, _ = _bitmask_l1(sx, sy, st, cx_arr, cy_arr, ct_arr, nc, ph_x, ph_y)
             best = int(np.argmin(l1))
-            chosen_mask = int(masks[best])
-            return [i for i in range(nc) if chosen_mask & (1 << i)], float(l1[best])
+            return [i for i in range(nc) if int(masks[best]) & (1 << i)], float(l1[best])
 
         _print_every = max(1, n_photons // 20)
         if verbosity >= 1:
@@ -1482,100 +1478,90 @@ class Analyse:
             if verbosity >= 1 and ph_j % _print_every == 0:
                 print('.', end='', flush=True)
 
-            ph_t  = photons['t'].iloc[ph_j]
-            ph_x  = photons['x'].iloc[ph_j]
-            ph_y  = photons['y'].iloc[ph_j]
-            ph_id = photons['photon_id'].iloc[ph_j]
+            ph_t  = ph_t_arr[ph_j]
+            ph_x  = ph_x_arr[ph_j]
+            ph_y  = ph_y_arr[ph_j]
+            ph_id = ph_id_arr[ph_j]
 
             # ── Step 1: seed pixel ────────────────────────────────────────────
-            # Spatial guard: prevents a photon from a different cluster stealing
-            # a seed pixel that merely shares its TOA.
-            ddx_all = pix_x - ph_x
-            ddy_all = pix_y - ph_y
-            if max_dist_px < np.inf:
-                near = (ddx_all * ddx_all + ddy_all * ddy_all) <= max_dist_px ** 2
-            else:
-                near = np.ones(n_px, dtype=bool)
-
-            # Seed TOA offsets tried in priority order:
+            # Use searchsorted (O(log n)) to find the narrow TOA window for each
+            # offset rather than scanning all pixels.  Seed TOA offsets:
             #   0       — exact match (most common)
             #   −25 ns  — EMPIR coarse-clock artefact: pixel TOA shifted 25 ns early
-            #   +25 ns  — OOB seed missing; next valid in-bounds pixel is 25 ns later
-            #   ±50 ns  — double coarse-clock stack (rare edge case)
-            _half_tick = TICK_S * 0.5
+            #   +25 ns  — OOB seed missing; next in-bounds pixel is 25 ns later
+            #   ±50 ns  — double coarse-clock stack (rare)
+            seed_i = None
             for _toa_offset in (0, -COARSE_CLK_S, COARSE_CLK_S,
-                                 -2 * COARSE_CLK_S, 2 * COARSE_CLK_S):
-                seed_mask = (~claimed) & near & (np.abs(pix_t - (ph_t + _toa_offset)) < _half_tick)
-                if seed_mask.any():
-                    break
-            if not seed_mask.any():
+                                  -2 * COARSE_CLK_S, 2 * COARSE_CLK_S):
+                t_seed = ph_t + _toa_offset
+                ls = int(np.searchsorted(pix_t, t_seed - HALF_TICK))
+                rs = int(np.searchsorted(pix_t, t_seed + HALF_TICK, side='right'))
+                if rs <= ls:
+                    continue
+                sc = np.arange(ls, rs)
+                sc = sc[~claimed[sc]]
+                if len(sc) == 0:
+                    continue
+                dx = pix_x[sc] - ph_x
+                dy = pix_y[sc] - ph_y
+                sc = sc[dx * dx + dy * dy <= r2_max]
+                if len(sc) == 0:
+                    continue
+                seed_i = int(sc[np.argmax(pix_tot[sc])])
+                break
+
+            if seed_i is None:
                 com_quality['failed'] += 1
                 continue
 
-            seed_cands = np.where(seed_mask)[0]
-            seed_i = seed_cands[int(np.argmax(pix_tot[seed_cands]))]   # largest TOT
-
             # ── Steps 2–4: exact search with widening time window ─────────────
-            found      = False
-            last_cand  = np.empty(0, dtype=np.intp)
-            prev_n_cand = -1   # skip bitmask when candidate count hasn't changed
+            t0          = pix_t[seed_i]
+            found       = False
+            last_cand   = np.empty(0, dtype=np.intp)
+            prev_n_cand = -1
 
-            for time_mult, radius_mult in search_schedule:
+            for time_mult, _ in search_schedule:
                 window = base_time_s * time_mult
-                cand_r = max_dist_px * radius_mult
 
-                # Candidates: unclaimed, toa ≥ seed toa, within window and radius
-                t0 = pix_t[seed_i]
-                cand_mask = (
-                    (~claimed) &
-                    (pix_t >= t0 - TICK_S * 0.5) &
-                    (pix_t <= ph_t + window) &
-                    (np.arange(n_px) != seed_i)
-                )
-                if cand_r < np.inf:
-                    cand_mask &= (ddx_all * ddx_all + ddy_all * ddy_all) <= cand_r ** 2
-                cand_idx = np.where(cand_mask)[0]
+                # Candidates: unclaimed, toa in [seed_toa, ph_t + window], within radius
+                # Use searchsorted — O(log n) instead of O(n) boolean mask over all pixels
+                lc = int(np.searchsorted(pix_t, t0 - HALF_TICK))
+                rc = int(np.searchsorted(pix_t, ph_t + window + HALF_TICK, side='right'))
+                cand_idx = np.arange(lc, rc) if rc > lc else np.empty(0, dtype=np.intp)
+                if len(cand_idx):
+                    keep = ~claimed[cand_idx] & (cand_idx != seed_i)
+                    cand_idx = cand_idx[keep]
+                if len(cand_idx):
+                    dx = pix_x[cand_idx] - ph_x
+                    dy = pix_y[cand_idx] - ph_y
+                    cand_idx = cand_idx[dx * dx + dy * dy <= r2_max]
 
-                # Skip this step if the candidate set is the same as the last one
-                # (wider time window brought no new pixels — bitmask would give same result)
                 if len(cand_idx) == prev_n_cand:
                     continue
                 prev_n_cand = len(cand_idx)
 
-                # Sort candidates by toa (time-order matching EMPIR)
-                cand_idx = cand_idx[np.argsort(pix_t[cand_idx])]
-                last_cand = cand_idx   # remember widest non-duplicate set for fallback
+                # Sort by toa (time-order matching EMPIR)
+                if len(cand_idx) > 1:
+                    cand_idx = cand_idx[np.argsort(pix_t[cand_idx])]
+                last_cand = cand_idx
 
                 combo, l1 = _exact_subset(seed_i, cand_idx, ph_x, ph_y)
                 if combo is not None:
                     members = np.array([seed_i] + [cand_idx[ci] for ci in combo])
-                    m_tot   = pix_tot[members]
-                    T       = m_tot.sum()
-                    # L1 CoG quality: |avg(px/x,w=tot) - ph/x| + |avg(px/y,w=tot) - ph/y|
-                    cog_l1  = l1   # already computed inside _exact_subset
-
                     claimed[members]   = True
                     assoc_id[members]  = ph_id
                     assoc_x[members]   = ph_x
                     assoc_y[members]   = ph_y
                     assoc_t[members]   = ph_t
-                    assoc_com[members] = cog_l1
-
-                    if cog_l1 < 1e-6:
-                        com_quality['exact'] += 1
-                    elif cog_l1 < 0.005:
-                        com_quality['good'] += 1
-                    elif cog_l1 < 0.01:
-                        com_quality['acceptable'] += 1
-                    else:                          # < COG_TOL (0.03) by construction
-                        com_quality['poor'] += 1
+                    assoc_com[members] = l1
+                    if l1 < 1e-6:       com_quality['exact'] += 1
+                    elif l1 < 0.005:    com_quality['good'] += 1
+                    elif l1 < 0.01:     com_quality['acceptable'] += 1
+                    else:               com_quality['poor'] += 1
                     found = True
                     break
 
             if not found:
-                # Optimization fallback: no window yielded an exact CoG match.
-                # Among all candidates in the widest window, claim the subset
-                # that minimises L1 CoG error (globally optimal for these candidates).
                 combo_opt, l1_opt = _optim_subset(seed_i, last_cand, ph_x, ph_y)
                 members = np.array([seed_i] + [last_cand[ci] for ci in combo_opt])
                 claimed[members]   = True
