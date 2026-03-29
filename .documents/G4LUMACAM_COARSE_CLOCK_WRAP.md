@@ -7,6 +7,15 @@ When the user computes `ph/toa - sim/toa` on `combined` data from `nea-assoc
 addition to the main peak at 0.  This satellite contains roughly 6 % of events
 and prevents accurate time-resolution measurements.
 
+> **Key finding (from empirical testing):** the G4LumaCam implementation also
+> sets `toa2 = wrapped pixel time` (= `sim/toa - 25 ns`) for wrapped pixels.
+> This means `ph/toa - sim/toa2` gives a clean distribution with **no satellite**
+> and is the correct reference for time-resolution measurement.
+> `ph/toa - sim/toa` retains the -25 ns satellite because `sim/toa` (SimPhotons)
+> is the continuous Geant4 true time, while `sim/toa2` (TracedPhotons) is aligned
+> to the 25 ns TPX3 coarse-clock grid — exactly the same 25 ns time-bin width
+> documented in the TPX3Cam manual (§7 Global Time Extension).
+
 ### Root cause
 
 Timepix3 encodes pixel arrival time using a 14-bit **coarse** counter (25 ns
@@ -185,52 +194,96 @@ if 'coarse_clock_wrap' in combined.columns:
 
 ---
 
-## How to use `sim/ccw` for time-resolution correction
+## Why `sim/ccw` alone is not sufficient for the correction
 
-After running `nea-assoc --merge-sim`, the `combined` CSV contains:
+`sim/ccw = True` flags every pixel that G4LumaCam wrote with a decremented
+coarse clock (all fine-bin-15 pixels).  However EMPIR successfully corrects
+**most** of these: the corrected pixel lands back at `true_toa` in
+ExportedPixels, and ph/toa = `true_toa` — correct, no adjustment needed.
+Only the small fraction that EMPIR **fails** to correct produce the -25 ns
+satellite.
 
-| column | meaning |
-|--------|---------|
-| `ph/toa` | EMPIR-reconstructed photon time (seconds) |
-| `ph/seed_dt_ns` | TOA offset NEA used to find the seed pixel (0, ±25, ±50 ns) |
-| `sim/toa2` | True simulation arrival time (ns) |
-| `sim/ccw` | `True` if the seed pixel was written with the -25 ns wrap bug |
+The problem is that both cases (EMPIR corrected and not corrected) produce
+`seed_dt_ns = 0` in NEA, because in both cases NEA finds the seed pixel
+exactly at `ph/toa`.  Applying `+= 25 ns` to all `sim/ccw=True, seed_dt_ns=0`
+events corrupts the majority that are already correct.
 
-### Filter for time resolution
+Empirical confirmation (from a typical PTB dataset):
+
+```
+sim/ccw=True, seed_dt_ns=0 → mean(ph/toa − sim/toa) ≈ −8.5 ns (not −25 ns)
+std ≈ 14 ns  →  only ~34 % are in the satellite; ~66 % have correct ph/toa
+```
+
+### Correct approach: use the per-pixel toa residual
+
+The uncorrected-wrapped pixel is the one where the pixel toa in ExportedPixels
+is **exactly 25 ns early** relative to the true simulation toa:
+
+```
+px/toa_ns  ≈  sim/toa2 − 25   (uncorrected)
+px/toa_ns  ≈  sim/toa2        (EMPIR corrected — do not touch)
+```
+
+This is a precise, zero-false-positive filter that does not rely on `sim/ccw`
+or `seed_dt_ns`.
+
+## How to use `sim/toa2` for time-resolution correction
+
+After running `nea-assoc --merge-sim`, the combined file contains:
+
+| column | meaning | units |
+|--------|---------|-------|
+| `ph/toa` | EMPIR-reconstructed photon time | seconds |
+| `px/toa` | seed pixel reconstructed time | seconds |
+| `ph/seed_dt_ns` | NEA seed-search offset (0, ±25, ±50 ns) | ns |
+| `sim/toa2` | True simulation pixel arrival time | ns |
+| `sim/ccw` | Pixel was at fine-bin-15 (may or may not be miscorrected) | bool |
+
+### Correction function
 
 ```python
-import pandas as pd
-import numpy as np
+def correction(df):
+    """
+    Correct ph/toa and ev/toa for pixels that EMPIR failed to un-wrap.
 
-df = pd.read_csv('AssociatedResults/combined.csv')
+    Logic: if a seed pixel's reconstructed toa (px/toa) is 25 ns earlier
+    than its true simulation toa (sim/toa2), EMPIR did not apply the
+    coarse-clock correction → ph/toa is 25 ns too early → add 25 ns.
+    """
+    # px/toa in seconds → ns; sim/toa2 already in ns
+    px_ns = df['px/toa'] * 1e9
+    pixel_offset = px_ns - df['sim/toa2']          # ≈ 0 normal, ≈ -25 uncorrected wrap
 
-# 1. Correct ph/toa for photons whose seed was an uncorrected wrapped pixel.
-#    These have sim/ccw = True AND seed_dt_ns = 0 (NEA found seed at ph/toa
-#    exactly, not at ph/toa ± 25 ns).  EMPIR did NOT correct this pixel, so
-#    ph/toa = true_toa - 25 ns → add 25 ns.
-needs_correction = (
-    df.get('sim/ccw', False) &
-    (df['ph/seed_dt_ns'].fillna(999) == 0)
-)
-df['ph/toa_corrected'] = df['ph/toa'].copy()
-df.loc[needs_correction, 'ph/toa_corrected'] += 25e-9   # seconds
+    is_uncorrected_wrap = (pixel_offset + 25).abs() < 2.0   # ±2 ns tolerance
+    is_seed = (df['px/toa'] - df['ph/toa']).abs() < 0.5e-9  # this pixel set ph/toa
 
-# 2. Exclude photons whose seed was out-of-bounds (no pixel at ph/toa in-chip),
-#    identified by seed_dt_ns = +25 ns.
-in_resolution = df['ph/seed_dt_ns'].isin([0, -25])
+    mask = is_uncorrected_wrap & is_seed
 
-# 3. Compute time residual (ns) for the resolution plot.
-df['dt_ns'] = (df['ph/toa_corrected'] - df['sim/toa2'] * 1e-9) * 1e9
+    orig_ph = df['ph/toa'].copy()
+    df.loc[mask, 'ph/toa'] += 25e-9
 
-resolution_df = df[in_resolution]
+    # ev/toa: if the corrected photon was the first photon in its event,
+    # ev/toa was also set from this pixel and needs the same +25 ns.
+    first_ph_of_event = (orig_ph - df['ev/toa']).abs() < 0.5e-9
+    events_to_fix = df.loc[mask & first_ph_of_event, 'ev/toa'].unique()
+    df.loc[df['ev/toa'].isin(events_to_fix), 'ev/toa'] += 25e-9
 ```
 
 ### Expected result
 
-- Main peak at 0 ns — correctly reconstructed photons.
-- The -25 ns satellite **disappears** after applying the correction above.
-- Photons with `seed_dt_ns = -25` (EMPIR corrected internally) contribute
-  to the main peak at 0 ns and should be included.
+- `mask` selects only the genuinely uncorrected-wrapped seed pixels (~3-5 % of events).
+- Main peak at 0 ns — correctly reconstructed photons unchanged.
+- The -25 ns satellite disappears.
+- No new artifact at +25 ns (EMPIR-corrected wrapped pixels are not touched).
+- Photons with `seed_dt_ns = -25` contribute to the main peak and are included.
+
+### Role of `sim/ccw` after this correction
+
+`sim/ccw` is no longer needed for the per-event correction.  It is still
+useful as a **diagnostic**: `df[df['sim/ccw']]['px/toa']*1e9 - df[df['sim/ccw']]['sim/toa2']`
+should be bimodal at {0, −25} ns, confirming G4LumaCam's wrap simulation
+and EMPIR's partial correction rate.
 
 ---
 
