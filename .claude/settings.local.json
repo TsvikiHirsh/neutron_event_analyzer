@@ -76,7 +76,15 @@
       "Bash(~/.local/bin/micromamba run:*)",
       "Read(//work/nuclear/G4LumaCam/notebooks/archive/openbeam_ptb_5e6/in_focus/TracedPhotons/**)",
       "Read(//work/nuclear/G4LumaCam/notebooks/archive/openbeam_ptb_5e6/TracedPhotons/**)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(find /work/nuclear/neutron_event_analyzer -type d -not -path */.* -not -path */__pycache__* -not -path *.egg-info* -not -path */build* -not -path */.pytest*)",
+      "Bash(/root/micromamba/bin/python3 -c \"import sys; sys.path.insert\\(0,''''/work/nuclear/neutron_event_analyzer/src''''\\); from neutron_event_analyzer.tagging import add_topology_tags; from neutron_event_analyzer.tagging.dtypes import PH_TAG_DTYPE; from neutron_event_analyzer.tagging.helpers import has_tag; from neutron_event_analyzer.tagging.features import photon_features; from neutron_event_analyzer.tagging.tags import assign_ph_tags; print\\(''''OK''''\\)\")",
+      "Bash(/root/micromamba/bin/pip show:*)",
+      "Bash(find /root/micromamba -name neutron_event_analyzer*.egg-link -o -name direct_url.json)",
+      "Bash(/root/micromamba/bin/nea-assoc --help)",
+      "Bash(/root/micromamba/bin/python3 -c \":*)",
+      "Bash(/root/micromamba/bin/python3 -c \"import matplotlib, seaborn, numpy; print\\(''matplotlib'', matplotlib.__version__\\); print\\(''seaborn'', seaborn.__version__\\)\")",
+      "Bash(/root/micromamba/bin/python3 -c \"import matplotlib; print\\(''mpl'', matplotlib.__version__\\); import scipy; print\\(''scipy ok''\\)\")"
     ]
   }
 }

@@ -143,6 +143,12 @@ def create_assoc_parser():
         help='Suppress all output except errors',
     )
     parser.add_argument(
+        '--tag',
+        action='store_true',
+        default=False,
+        help='Compute and append photon/event topology tags (ph/tags, ev/tags)',
+    )
+    parser.add_argument(
         '--advanced',
         action='store_true',
         default=False,
@@ -361,6 +367,41 @@ def main_assoc():
                 import traceback
                 traceback.print_exc()
             sys.exit(1)
+
+        # ------------------------------------------------------------------
+        # Topology tagging (optional)
+        # ------------------------------------------------------------------
+        if args.tag:
+            df = analyser.associated_df
+            _PX_COLS = {"px/x", "px/y", "px/toa", "px/tot"}
+            if df is None or len(df) == 0:
+                print("Warning: --tag skipped — association produced no data")
+            elif not _PX_COLS.issubset(df.columns):
+                missing = _PX_COLS - set(df.columns)
+                print(
+                    f"Warning: --tag skipped — pixel columns missing: {sorted(missing)}. "
+                    "Tagging requires pixel-level data (re-run without --no-pixels)."
+                )
+            else:
+                from .tagging import add_topology_tags
+                if verbosity >= 1:
+                    print("Computing topology tags...")
+                try:
+                    analyser.associated_df = add_topology_tags(analyser.associated_df)
+                    # Re-save so the auto-saved file includes the tag columns.
+                    analyser.save_associations(
+                        format=args.format,
+                        suffix=args.suffix,
+                        verbosity=verbosity,
+                    )
+                    if verbosity >= 1:
+                        print("Tags added: ph/tags, ev/tags")
+                except Exception as e:
+                    print(f"Error during tagging: {e}")
+                    if verbosity >= 2:
+                        import traceback
+                        traceback.print_exc()
+                    sys.exit(1)
 
     # ------------------------------------------------------------------
     # Save to user-specified output dir (if given)
