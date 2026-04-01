@@ -1,19 +1,42 @@
-"""Tag vocabulary definitions."""
+"""Tag vocabulary definitions.
+
+Photon tags — morphology of a single scintillation cluster (pixel group):
+
+  Size      : point, small, large
+  Shape     : round, elongated, sparse
+  CoG       : centered, offset
+  Temporal  : bimodal, spread
+  Intensity : bright, dim
+  Physics   : track, hot
+
+Event tags — spatial/temporal arrangement of photons in one neutron event:
+
+  Multiplicity : solo, pair, multi
+  Geometry     : tight, loose, linear, ring, wide
+"""
 
 import pandas as pd
 
 PH_TAG_DTYPE = pd.CategoricalDtype(categories=[
-    "single_pixel", "small_blob", "large_blob",
-    "symmetric", "asymmetric", "line",
-    "sparse", "centered", "satellite", "distant_pixels",
-    "delayed", "sparse_time",
-    "high_yield", "shallow_tot",
+    # size
+    "point", "small", "large",
+    # shape
+    "round", "elongated", "sparse",
+    # center-of-gravity
+    "centered", "offset",
+    # temporal
+    "bimodal", "spread",
+    # intensity
+    "bright", "dim",
+    # physics
+    "track", "hot",
 ], ordered=False)
 
 EV_TAG_DTYPE = pd.CategoricalDtype(categories=[
-    "single_ph", "double_ph", "triple_ph", "multi_ph",
-    "close", "far", "centered", "satellite",
-    "delayed", "in_line", "symmetric",
+    # multiplicity
+    "solo", "pair", "multi",
+    # geometry
+    "tight", "loose", "linear", "ring", "wide",
 ], ordered=False)
 
 
