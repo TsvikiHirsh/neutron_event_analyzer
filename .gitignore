@@ -12,7 +12,13 @@ tests/test_data/test_cog_calculation
 tests/test_data/test_*
 notebooks/*.joblib
 .claude
-src/neutron_event_analyzer/tagging/__pycache__
+src/neutron_event_analyzer/tagging/__pycache__/*
 src/neutron_event_analyzer/tagging/__pycache__/features.cpython-313.pyc
+src/neutron_event_analyzer/tagging/__pycache__/pipeline.cpython-313.pyc
+src/neutron_event_analyzer/tagging/__pycache__/tags.cpython-313.pyc
+src/neutron_event_analyzer/tagging/__pycache__/__init__.cpython-313.pyc
+src/neutron_event_analyzer/tagging/__pycache__/dtypes.cpython-313.pyc
+src/neutron_event_analyzer/tagging/__pycache__/features.cpython-313.pyc
+src/neutron_event_analyzer/tagging/__pycache__/helpers.cpython-313.pyc
 src/neutron_event_analyzer/tagging/__pycache__/pipeline.cpython-313.pyc
 src/neutron_event_analyzer/tagging/__pycache__/tags.cpython-313.pyc
