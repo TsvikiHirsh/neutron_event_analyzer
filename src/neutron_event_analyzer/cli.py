@@ -245,6 +245,15 @@ def create_assoc_parser():
             'AssociatedResults/associated_data[_suffix].csv. Implies --merge-sim.'
         ),
     )
+    parser.add_argument(
+        '--tags-only',
+        action='store_true',
+        default=False,
+        help=(
+            'Skip association entirely; apply topology tags to an existing '
+            'AssociatedResults/associated_data[_suffix].csv and overwrite it.'
+        ),
+    )
 
     # ---- Output (advanced) -------------------------------------------------
     _mark_advanced(parser.add_argument(
@@ -296,9 +305,57 @@ def main_assoc():
         print(f"Data: {args.data}")
         if args.settings:
             print(f"Settings: {args.settings}")
-        print(f"Method: {args.method}")
+        if not args.tags_only:
+            print(f"Method: {args.method}")
         if args.suffix:
             print(f"Suffix: {args.suffix}")
+
+    # ------------------------------------------------------------------
+    # Tags-only mode: re-tag an existing associated CSV, skip everything else
+    # ------------------------------------------------------------------
+    if args.tags_only:
+        from pathlib import Path
+        from .tagging import add_topology_tags
+
+        stem = f"associated_data_{args.suffix}" if args.suffix else "associated_data"
+        ext  = ".parquet" if args.format == "parquet" else ".csv"
+        src  = Path(args.output_dir) if args.output_dir else Path(args.data) / "AssociatedResults"
+        src_file = src / (stem + ext)
+
+        if not src_file.exists():
+            print(f"Error: --tags-only found no file at {src_file}")
+            sys.exit(1)
+
+        if verbosity >= 1:
+            print(f"Tags-only mode — loading {src_file}")
+        try:
+            if args.format == "parquet":
+                import pandas as pd
+                df = pd.read_parquet(src_file)
+            else:
+                import pandas as pd
+                df = pd.read_csv(src_file)
+
+            if verbosity >= 1:
+                print(f"  {len(df):,} rows — computing topology tags...")
+
+            df = add_topology_tags(df)
+
+            if args.format == "parquet":
+                df.to_parquet(src_file, index=False)
+            else:
+                df.to_csv(src_file, index=False)
+
+            if verbosity >= 1:
+                print(f"  Tags written → {src_file}")
+                print("=" * 60)
+        except Exception as e:
+            print(f"Error during tags-only tagging: {e}")
+            if verbosity >= 2:
+                import traceback
+                traceback.print_exc()
+            sys.exit(1)
+        return
 
     if not args.merge_only:
         # ------------------------------------------------------------------
