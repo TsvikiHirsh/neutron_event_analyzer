@@ -665,6 +665,14 @@ class Analyse:
                 print("Warning: need at least two data tiers for association")
             self.associated_df = pd.DataFrame()
 
+        # Satellite-aware event-position estimators (v0.4)
+        if self.associated_df is not None and len(self.associated_df) > 0:
+            try:
+                self.compute_event_positions(verbosity=verbosity)
+            except Exception as e:
+                if verbosity >= 2:
+                    print(f"Warning: could not compute event positions: {e}")
+
         # Auto-save
         if self.associated_df is not None and len(self.associated_df) > 0:
             try:
@@ -681,6 +689,105 @@ class Analyse:
             return HTML(self._repr_html_())
         except ImportError:
             return self.associated_df
+
+    def compute_event_positions(self, verbosity=1):
+        """
+        Compute alternative event-position estimators from the association
+        (new in v0.4, motivated by intensifier-afterpulse satellite clusters):
+
+        - ``ev/x_cog``,     ``ev/y_cog``     : mean of the constituent photon
+          positions (EMPIR's conventional event position);
+        - ``ev/x_first``,   ``ev/y_first``   : position of the earliest photon;
+        - ``ev/x_largest``, ``ev/y_largest`` : position of the photon cluster
+          with the most associated pixels (the parent blob). Robust against
+          afterpulse satellites, which carry fewer pixels; recommended for
+          multi-photon reconstructions.
+
+        The columns are added to ``associated_df`` (repeated on every pixel
+        row of the event) and included in the exported CSV.
+
+        Returns:
+            pd.DataFrame: The updated associated DataFrame.
+        """
+        df = self.associated_df
+        if df is None or len(df) == 0:
+            raise ValueError("No association data. Run associate() first.")
+
+        def _col(*names):
+            for n in names:
+                if n in df.columns:
+                    return n
+            return None
+
+        ph_id = _col('assoc_photon_id', 'ph/id')
+        ph_x = _col('assoc_phot_x', 'ph/x')
+        ph_y = _col('assoc_phot_y', 'ph/y')
+        ph_t = _col('assoc_phot_t', 'ph/toa')
+        ev_id = _col('assoc_event_id', 'assoc_cluster_id', 'ev/id')
+        if ph_id is None or ev_id is None:
+            if verbosity >= 2:
+                print("compute_event_positions: photon/event id columns not found; skipping")
+            return df
+
+        cols = [c for c in (ev_id, ph_id, ph_x, ph_y, ph_t) if c is not None]
+        sub = df[cols].dropna(subset=[ev_id, ph_id])
+        if len(sub) == 0:
+            return df
+
+        # Index-only association tables (px/id, ph/id, ev/id) carry no photon
+        # coordinates: pull them from the ExportedPhotons CSVs by photon id.
+        if ph_x is None:
+            lookup = None
+            import glob as _glob
+            for f in sorted(_glob.glob(os.path.join(
+                    self.data_folder, "ExportedPhotons", "*.csv"))):
+                try:
+                    tab = pd.read_csv(f)
+                except Exception:
+                    continue
+                if all(c in tab.columns for c in ('ph/id', 'ph/x', 'ph/y')):
+                    keep = ['ph/id', 'ph/x', 'ph/y'] + \
+                           (['ph/toa'] if 'ph/toa' in tab.columns else [])
+                    lookup = tab[keep] if lookup is None else pd.concat(
+                        [lookup, tab[keep]], ignore_index=True)
+            if lookup is None:
+                if verbosity >= 2:
+                    print("compute_event_positions: no photon coordinates "
+                          "available; skipping")
+                return df
+            lookup = lookup.drop_duplicates('ph/id')
+            sub = sub.merge(lookup.rename(columns={'ph/id': ph_id}), on=ph_id,
+                            how='left')
+            ph_x, ph_y = 'ph/x', 'ph/y'
+            ph_t = 'ph/toa' if 'ph/toa' in sub.columns else None
+            sub = sub.dropna(subset=[ph_x])
+
+        # pixels per photon = number of associated pixel rows
+        npx = sub.groupby([ev_id, ph_id]).size().rename('npx')
+        ph_tab = (sub.drop_duplicates([ev_id, ph_id])
+                     .join(npx, on=[ev_id, ph_id]))
+
+        cog = ph_tab.groupby(ev_id)[[ph_x, ph_y]].mean()
+        cog.columns = ['ev/x_cog', 'ev/y_cog']
+
+        largest = (ph_tab.sort_values([ev_id, 'npx'], ascending=[True, False])
+                          .groupby(ev_id).first()[[ph_x, ph_y]])
+        largest.columns = ['ev/x_largest', 'ev/y_largest']
+
+        pos = cog.join(largest)
+        if ph_t is not None:
+            first = (ph_tab.sort_values([ev_id, ph_t])
+                            .groupby(ev_id).first()[[ph_x, ph_y]])
+            first.columns = ['ev/x_first', 'ev/y_first']
+            pos = pos.join(first)
+
+        for c in pos.columns:
+            df[c] = df[ev_id].map(pos[c])
+        self.associated_df = df
+        if verbosity >= 2:
+            print(f"compute_event_positions: added {list(pos.columns)} "
+                  f"for {len(pos):,} events")
+        return df
 
     def _run_pixel_photon_assoc(self, method, max_dist_px, max_time_ns, verbosity,
                                 min_pixels=1, relax=1.0):

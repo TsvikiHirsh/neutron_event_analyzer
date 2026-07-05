@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "neutron_event_analyzer"
-version = "0.3.0"
+version = "0.4.0"
 description = "Associate neutron event camera data across reconstruction tiers"
 readme = "README.md"
 authors = [{ name = "Tsviki Y. Hirsh", email = "tsviki.hirsh@gmail.com" }]

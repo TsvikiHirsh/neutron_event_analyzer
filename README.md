@@ -54,6 +54,35 @@ my_data/
     └── association_stats.json     # Match rates and distributions
 ```
 
+## Event-Position Estimators (new in v0.4)
+
+Multi-photon events in intensified event cameras can contain faint *satellite*
+clusters produced by afterpulsing in the MCP image intensifier (photoelectron
+backscattering across the photocathode-MCP gap, or secondary-ion emission;
+Mahon et al. 2024, NIM-A 1059 168816). A satellite pulls the conventional
+photon-mean event position off the true interaction point by several pixels.
+
+NEA now computes three event-position estimators from the association and adds
+them to the output table:
+
+| column | estimator | notes |
+|---|---|---|
+| `ev/x_cog`, `ev/y_cog` | mean of constituent photon positions | conventional |
+| `ev/x_first`, `ev/y_first` | earliest photon | timing-anchored |
+| `ev/x_largest`, `ev/y_largest` | photon cluster with the most pixels | **satellite-robust, recommended** |
+
+In the PTB fast-neutron calibration, largest-cluster positioning recovers the
+multi-photon spatial resolution from 0.82 mm to 0.31 mm (essentially the
+single-photon limit). The estimators are computed automatically at the end of
+`associate()` and are also available via `Analyse.compute_event_positions()`,
+which works on index-only association tables by pulling photon coordinates
+from `ExportedPhotons/`.
+
+The calibrated G4LumaCam detector model used for these studies is available as
+`neutron_event_analyzer.config.BEST_DETECTOR_MODEL`, and the `out_of_focus`
+settings preset now records `position_mode: "largest"` as the recommended
+reconstruction choice.
+
 ## CLI Usage
 
 ```
