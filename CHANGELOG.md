@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.5.1] - 2026-10-02
+
+### Added
+- **`truth` module** (`join_truth`, `load_truth`): attaches the G4LumaCam simulation
+  truth (TracedPhotons and SimPhotons: optical truth, emission point, parent particle
+  and vertex, neutron energy, last interaction and entry point) to every pixel row of
+  an associated table. Pixels are matched on the exact key (x, y, clock tick), which
+  does not depend on the order of the exported rows.
+
 ## [0.5.0] - 2026-10-02
 
 ### Added
