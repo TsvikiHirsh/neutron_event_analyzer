@@ -83,6 +83,26 @@ The calibrated G4LumaCam detector model used for these studies is available as
 settings preset now records `position_mode: "largest"` as the recommended
 reconstruction choice.
 
+## Per-Event Observables (new in v0.5)
+
+`neutron_event_analyzer.observables` turns an associated table into the five
+per-event distributions used to calibrate a detector model against measured data,
+and compares two data sets with a weighted symmetric chi-squared distance:
+
+```python
+from neutron_event_analyzer import Analyse, observables as obs
+
+exp = Analyse('measured_run'); exp.load(); exp.associate()
+sim = Analyse('simulated_run'); sim.load(); sim.associate()
+window = dict(energy_window=(1, 10), flight_path_m=10.85)
+d_exp = obs.extract_distributions(exp.associated_df, ev_n_min=2, **window)
+d_sim = obs.extract_distributions(sim.associated_df, ev_n_min=2, **window)
+print(obs.compare(d_exp, d_sim))   # per observable and 'total'
+```
+
+`spectrum_weights()` gives one data set the neutron-energy mix of another
+(per-event weights in a column passed as `weight_col`).
+
 ## CLI Usage
 
 ```

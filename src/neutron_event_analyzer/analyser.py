@@ -266,7 +266,7 @@ class Analyse:
     # =========================================================================
 
     def load(self, events=True, photons=True, pixels=True,
-             limit=None, query=None, verbosity=None):
+             limit=None, query=None, verbosity=None, xy_offset='auto'):
         """
         Load data from ExportedEvents, ExportedPhotons, and/or ExportedPixels directories.
 
@@ -279,9 +279,16 @@ class Analyse:
             limit (int or float): Row limit (int) or max TOA in seconds (float).
             query (str): Pandas query to filter events (e.g. "PSD > 0.5").
             verbosity (int): Override instance verbosity.
+            xy_offset ('auto', tuple or None): Shift subtracted from the photon and
+                event coordinates so that they share the pixel frame. EMPIR >= 1.0.1
+                places the photons and events of a single-chip camera at a chip
+                offset (e.g. +260 px in x) while the pixel export stays in chip
+                coordinates. 'auto' (default) detects a whole-pixel offset larger
+                than 100 px from the pixel and photon coordinates; None disables.
         """
         if verbosity is None:
             verbosity = self.verbosity
+        self._xy_offset_request = xy_offset
 
         if events:
             events_dir = os.path.join(self.data_folder, "ExportedEvents")
@@ -361,6 +368,38 @@ class Analyse:
         if self.pixels_df is not None and len(self.pixels_df) > 0:
             if self.photons_df is not None and len(self.photons_df) > 0:
                 self._correct_pixel_time_offset(verbosity=verbosity)
+                self._correct_xy_offset(self._xy_offset_request, verbosity=verbosity)
+
+    def _correct_xy_offset(self, request, verbosity=0):
+        """Bring photon and event coordinates into the pixel frame (see load())."""
+        if request is None:
+            self.xy_offset = (0.0, 0.0)
+            return
+        if request == 'auto':
+            # mode of the photon - pixel coordinate differences over pairs close in
+            # time: a photon sits on its own pixels, so the mode is the chip offset
+            px, ph = self.pixels_df.sort_values('t'), self.photons_df
+            sample = ph.sample(min(len(ph), 20000), random_state=0)
+            pt = px['t'].to_numpy(); lo = np.searchsorted(pt, sample['t'].to_numpy() - 50e-9)
+            hi = np.searchsorted(pt, sample['t'].to_numpy() + 50e-9)
+            off = []
+            for c in ('x', 'y'):
+                pc = px[c].to_numpy(); sc = sample[c].to_numpy()
+                d = np.concatenate([sc[i] - pc[lo[i]:hi[i]] for i in range(len(sample)) if hi[i] > lo[i]] or [np.zeros(1)])
+                h, e = np.histogram(d, bins=np.arange(-600.5, 601.5, 1.0))
+                o = float(np.round(0.5 * (e[np.argmax(h)] + e[np.argmax(h) + 1])))
+                off.append(o if abs(o) > 100 else 0.0)
+        else:
+            off = [float(request[0]), float(request[1])]
+        self.xy_offset = tuple(off)
+        if off == [0.0, 0.0]:
+            return
+        for df in (self.photons_df, self.events_df):
+            if df is not None and len(df) > 0:
+                df['x'] = df['x'] - off[0]
+                df['y'] = df['y'] - off[1]
+        if verbosity >= 1:
+            print(f"Photon and event coordinates shifted by ({-off[0]:+g}, {-off[1]:+g}) px into the pixel frame")
 
     def _load_event_csv(self, path, verbosity=0):
         try:
@@ -390,6 +429,12 @@ class Analyse:
     def _load_photon_csv(self, path, verbosity=0):
         try:
             df = pd.read_csv(path)
+            if len(df.columns) == 6 and 'nPixelActivations' in ''.join(df.columns):
+                # EMPIR >= 1.0.1: x, y, t, nPixelActivations, intensity, t_relToExtTrigger
+                df.columns = ["x", "y", "t", "npx", "intensity", "tof"]
+                df[["x", "y", "t", "npx", "intensity"]] = df[["x", "y", "t", "npx", "intensity"]].astype(float)
+                df["tof"] = pd.to_numeric(df["tof"], errors="coerce")
+                return df
             if list(df.columns) == ["x", "y", "toa", "tof"]:
                 df.columns = ["x", "y", "t", "tof"]
             elif len(df.columns) == 4:
@@ -643,6 +688,11 @@ class Analyse:
             # Merge event info into pixel dataframe
             self.associated_df = self._merge_pixel_photon_event(
                 pixels_assoc, self.associated_df, verbosity)
+            # photon attributes exported by EMPIR >= 1.0.1 (pixel count, intensity)
+            for src, dst in (('npx', 'ph/npx'), ('intensity', 'ph/intensity')):
+                if src in self.photons_df.columns and 'ph/id' in self.associated_df.columns:
+                    self.associated_df[dst] = self.associated_df['ph/id'].map(
+                        self.photons_df.set_index('photon_id')[src])
 
         elif has_px and has_ph:
             # 2-tier: pixels -> photons
@@ -849,6 +899,8 @@ class Analyse:
                    'assoc_t', 'assoc_n', 'assoc_PSD']
         if 'assoc_com_dist' in photons_with_events.columns:
             ev_cols.append('assoc_com_dist')
+        if 'assoc_tof' in photons_with_events.columns:
+            ev_cols.append('assoc_tof')
 
         if 'photon_id' in photons_with_events.columns and \
                 'assoc_photon_id' in pixels_assoc.columns:
@@ -1083,6 +1135,8 @@ class Analyse:
         e_n   = events['n'].to_numpy().astype(np.int32)
         e_psd = events['PSD'].to_numpy() if 'PSD' in events.columns \
                 else np.zeros(len(events))
+        e_tof = events['tof'].to_numpy(dtype=float) if 'tof' in events.columns \
+                else np.full(len(events), np.nan)
         e_id  = events['event_id'].to_numpy()
 
         # Pre-compute ALL window boundaries at once — O(log n) each, fully vectorised
@@ -1095,6 +1149,7 @@ class Analyse:
         out_et  = np.full(n_ph, np.nan)
         out_en  = np.zeros(n_ph,  dtype=float)
         out_psd = np.zeros(n_ph,  dtype=float)
+        out_tof = np.full(n_ph, np.nan)
         out_com = np.full(n_ph, np.inf)   # inf sentinel for conflict resolution
 
         # Single pass: for each event, find photons, resolve conflicts inline
@@ -1141,6 +1196,7 @@ class Analyse:
             out_eid[sel2] = eid
             out_ex[sel2]  = ex;   out_ey[sel2]  = ey;   out_et[sel2]  = et
             out_en[sel2]  = en;   out_psd[sel2] = epsd;  out_com[sel2] = com_dist
+            out_tof[sel2] = e_tof[i]
 
         # Single bulk write-back (×100 faster than per-row loc[])
         photons = photons.assign(
@@ -1150,6 +1206,7 @@ class Analyse:
             assoc_t         = out_et,
             assoc_n         = out_en,
             assoc_PSD       = out_psd,
+            assoc_tof       = out_tof,
             assoc_com_dist  = np.where(np.isinf(out_com), np.nan, out_com),
             time_diff_ns    = np.nan,
             spatial_diff_px = np.nan,
@@ -2330,7 +2387,7 @@ class Analyse:
             'pixel_com_dist': 'ph/cog', 'seed_toa_offset_ns': 'ph/seed_dt_ns',
             'assoc_event_id': 'ev/id',
             'assoc_x': 'ev/x', 'assoc_y': 'ev/y', 'assoc_t': 'ev/toa',
-            'assoc_n': 'ev/n', 'assoc_PSD': 'ev/psd', 'assoc_com_dist': 'ev/cog',
+            'assoc_n': 'ev/n', 'assoc_PSD': 'ev/psd', 'assoc_com_dist': 'ev/cog', 'assoc_tof': 'ev/tof',
         }
         cols = {k: v for k, v in rename.items() if k in df.columns}
         df = df.rename(columns=cols)
@@ -2353,7 +2410,7 @@ class Analyse:
             'pixel_com_dist': 'ph/cog', 'seed_toa_offset_ns': 'ph/seed_dt_ns',
             'assoc_event_id': 'ev/id', 'assoc_cluster_id': 'ev/id',
             'assoc_x': 'ev/x', 'assoc_y': 'ev/y', 'assoc_t': 'ev/toa',
-            'assoc_n': 'ev/n', 'assoc_PSD': 'ev/psd', 'assoc_com_dist': 'ev/cog',
+            'assoc_n': 'ev/n', 'assoc_PSD': 'ev/psd', 'assoc_com_dist': 'ev/cog', 'assoc_tof': 'ev/tof',
         }
         if has_pixel:
             rename.update({'x': 'px/x', 'y': 'px/y', 't': 'px/toa', 'tot': 'px/tot', 'tof': 'px/tof'})

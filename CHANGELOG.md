@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.5.0] - 2026-10-02
+
+### Added
+- **`observables` module**: the five per-event distributions used to calibrate a
+  detector model against measured data (pixels per photon cluster, clusters per
+  event, pixel-to-event x residual, pixel arrival time within the event, distance of
+  each extra cluster from the largest cluster of its event) and their weighted
+  symmetric chi-squared comparison (`extract_distributions`, `compare`). Selections by
+  event size and by neutron energy from the time of flight (with an optional
+  time-of-flight calibration, nres convention), per-event weights and
+  `spectrum_weights()` to compare two data sets at the same neutron-energy mix.
+- Event time of flight in the associated table (`ev/tof`).
+- EMPIR >= 1.0.1 photon exports: the pixel count (`ph/npx`) and intensity
+  (`ph/intensity`) of every photon are read and carried into the associated table.
+- `load(xy_offset='auto')`: EMPIR >= 1.0.1 places the photons and events of a
+  single-chip camera at a chip offset (+260 px in x) while the pixel export stays in
+  chip coordinates; the offset is detected from pixel-photon pairs and removed.
+
 ## [0.4.0] - 2026-07-05
 
 ### Added
