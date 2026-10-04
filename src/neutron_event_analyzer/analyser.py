@@ -740,6 +740,54 @@ class Analyse:
         except ImportError:
             return self.associated_df
 
+    def associate_exact(self, first_events="ExportedEventsFirst", duration_s=None, verbosity=None,
+                        save=True):
+        """
+        Exact photon-event association of an EMPIR reconstruction (see ``exact``).
+
+        Needs the photon and event exports of the photon-mean reconstruction (``load(pixels=False)``)
+        and the event export of an earliest-photon reconstruction of the same photons
+        (``noBranchChain_ghostPhoton_firstPhotonPos_direct``), given as a folder name under
+        data_folder, a path, or a DataFrame. Every event is reproduced from its photons; the
+        result has one row per (event, photon) with the photon-mean, earliest-photon and
+        largest-cluster positions of the event.
+        """
+        from .exact import associate_exact, event_positions, STATUS
+        if verbosity is None:
+            verbosity = self.verbosity
+        if isinstance(first_events, pd.DataFrame):
+            fev = first_events
+        else:
+            d = first_events if os.path.isabs(str(first_events)) else os.path.join(self.data_folder, first_events)
+            files = sorted(glob.glob(os.path.join(d, "*.csv")))
+            if not files:
+                raise FileNotFoundError(f"no earliest-photon event export in {d}")
+            fev = pd.concat([self._load_event_csv(f, verbosity) for f in files], ignore_index=True)
+        if duration_s is None:
+            duration_s = float(self.settings.get("photon2event", {}).get("durationMax_s", 1e-6) or 1e-6)
+        ev = self.events_df.sort_values("t", kind="stable").reset_index(drop=True)
+        fev = fev.sort_values("t", kind="stable").reset_index(drop=True)
+        ph = self.photons_df.reset_index(drop=True)
+        members, status = associate_exact(ph, ev, fev, duration_s=duration_s)
+        pos = event_positions(ph, ev, fev, members)
+        m = members.join(ph[["x", "y", "t"] + [c for c in ("npx", "intensity", "tof") if c in ph.columns]],
+                         on="photon")
+        m = m.rename(columns={"x": "ph/x", "y": "ph/y", "t": "ph/toa", "npx": "ph/npx",
+                              "intensity": "ph/intensity", "tof": "ph/tof", "photon": "ph/id"})
+        evc = ev.rename(columns={"x": "ev/x", "y": "ev/y", "t": "ev/toa", "n": "ev/n", "PSD": "ev/psd",
+                                 "tof": "ev/tof"}).join(pos)
+        evc["ev/status"] = status
+        self.associated_df = m.rename(columns={"event": "ev/id"}).join(evc, on="ev/id")
+        self.assoc_method = "exact"
+        counts = np.bincount(status, minlength=len(STATUS))
+        self.last_photon_event_stats = {"method": "exact", "events": int(len(ev)),
+                                        "status": {STATUS[k]: int(c) for k, c in enumerate(counts)}}
+        if verbosity >= 1:
+            print(f"Exact association: {counts[0]:,}/{len(ev):,} events reproduced from their photons")
+        if save:
+            self.save_associations(filename="associated_data_exact.csv", verbosity=verbosity)
+        return self.associated_df
+
     def compute_event_positions(self, verbosity=1):
         """
         Compute alternative event-position estimators from the association

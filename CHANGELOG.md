@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased] - exact association
+
+### Added
+- **`exact` module** and `Analyse.associate_exact()`: exact photon-to-event association of an
+  EMPIR reconstruction from its standard exports. The earliest photon of each event is taken from
+  an earliest-photon reconstruction of the same photons (`..._firstPhotonPos_direct`), and the other
+  photons are the set within the event duration whose mean reproduces the event position. Every
+  event is reproduced (measured PTB data, early and late files of a 30-min run: 100%), photons shared
+  by two events are kept, and the largest-cluster position uses EMPIR's pixel count per photon.
+  Burst events beyond the search limits fall back to the photons nearest the event position
+  (`ev/status`).
+
 ## [0.5.1] - 2026-10-02
 
 ### Added
