@@ -802,10 +802,16 @@ class Analyse:
             k = pd.DataFrame({"k_t": _ticks(px.loc[has, "ph/toa"]), "k_x": _units(px.loc[has, "ph/x"], 100),
                               "k_y": _units(px.loc[has, "ph/y"], 100)})
             fixed = k.merge(key, on=["k_t", "k_x", "k_y"], how="left")["k_id"].to_numpy()
-            px = px.copy()
-            px.loc[has, "ph/id"] = np.where(np.isnan(fixed), px.loc[has, "ph/id"].to_numpy(), fixed)
-            px = px[[c for c in px.columns if not c.startswith("ev/")]].merge(mem, on="ph/id", how="left")
-            self.associated_df = px.join(evc, on="ev/id")
+            del k, key
+            ids = px["ph/id"].to_numpy(float).copy()
+            ids[has] = np.where(np.isnan(fixed), ids[has], fixed)
+            px["ph/id"] = ids                                    # in place: the pixel table is large
+            px.drop(columns=[c for c in px.columns if c.startswith("ev/")], inplace=True)
+            self.associated_df = None
+            px = px.merge(mem, on="ph/id", how="left")
+            for c in evc.columns:                                # attach the event columns without a further copy
+                px[c] = evc[c].reindex(px["ev/id"].to_numpy()).to_numpy()
+            self.associated_df = px
         else:
             self.associated_df = m.rename(columns={"event": "ev/id"}).join(evc, on="ev/id")
         self.assoc_method = "exact"
