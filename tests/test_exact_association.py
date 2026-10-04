@@ -25,3 +25,20 @@ def test_exact_membership_and_largest():
     assert got == [sorted(g) for g in groups]
     pos = event_positions(ph, ev, fe, members)
     assert pos["ev/x_largest"].tolist() == [14.0, 60.0, 200.0]     # most pixels in each event
+
+
+def test_exact_by_time_without_first_photon_export():
+    # same list as above, the earliest photons taken from the event clock ticks; a second photon
+    # on the tick of event A (decoy 7) must not change the membership
+    rows = [(10.00, 10.00, 100, 3), (60.00, 60.00, 101, 5), (14.00, 11.00, 103, 9), (12.50, 9.50, 120, 2),
+            (62.00, 61.00, 130, 4), (200.0, 5.0, 500, 7), (12.10, 10.20, 104, 6), (40.0, 40.0, 100, 1)]
+    ph = pd.DataFrame({"x": [r[0] for r in rows], "y": [r[1] for r in rows],
+                       "t": [r[2] * TICK_S for r in rows], "npx": [r[3] for r in rows]})
+    groups = [[0, 2, 3], [1, 4], [5]]
+    ev = pd.DataFrame([dict(zip(("x", "y"), _event(rows, g)), t=rows[g[0]][2] * TICK_S, n=len(g)) for g in groups])
+    members, status = associate_exact(ph, ev, None)
+    assert (status == 0).all()
+    assert [sorted(members.loc[members.event == i, "photon"]) for i in range(3)] == [sorted(g) for g in groups]
+    pos = event_positions(ph, ev, None, members)
+    assert pos["ev/x_first"].tolist() == [10.0, 60.0, 200.0]
+    assert pos["ev/x_largest"].tolist() == [14.0, 60.0, 200.0]

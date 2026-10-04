@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased] - exact association
+## [0.6.0] - 2026-10-04
 
 ### Added
 - **`exact` module** and `Analyse.associate_exact()`: exact photon-to-event association of an
@@ -11,6 +11,14 @@
   by two events are kept, and the largest-cluster position uses EMPIR's pixel count per photon.
   Burst events beyond the search limits fall back to the photons nearest the event position
   (`ev/status`).
+- `associate_exact(first_events=None)`: without an earliest-photon reconstruction the earliest
+  photon is one of the photons on the event's clock tick; when several share it, the one for which
+  the other photons admit an exact subset is taken. Same membership (simulated and measured PTB
+  data: 100% of the events reproduced).
+- `associate_exact(pixels=True)`: the pixel table of `associate()` (pixel-photon step) with the
+  exact photon-event step, for the pixel-level observables. The photon id of every pixel row is
+  re-derived from the stored cluster time and position, which corrects the about 1% of pixel rows
+  whose id pointed to a neighbouring cluster.
 
 ## [0.5.1] - 2026-10-02
 

@@ -10,7 +10,10 @@ photon2event fix the membership completely:
 
 Reconstructing the same photons a second time with the earliest-photon position
 (algorithm ``noBranchChain_ghostPhoton_firstPhotonPos_direct``, identical event list)
-identifies the earliest photon of every event. The remaining n - 1 photons are then the
+identifies the earliest photon of every event. Without that reconstruction the earliest
+photon is one of the photons on the event's clock tick, and when several share the tick,
+the one for which the other photons admit an exact subset is taken (the membership is the
+same either way). The remaining n - 1 photons are then the
 subset of the photons within the event duration whose mean, together with the earliest
 photon, reproduces the event position. The subset is searched depth first in time order,
 so the earliest consistent photons are taken. Photons may belong to two events (EMPIR's
@@ -79,7 +82,7 @@ def _search(pool, px, py, need, tx, ty, tol, max_steps):
     return 0, None
 
 
-def associate_exact(photons, events, first_events, duration_s=1e-6, units_per_px=100,
+def associate_exact(photons, events, first_events=None, duration_s=1e-6, units_per_px=100,
                     max_pool=80, max_steps=200_000):
     """
     Associate EMPIR photons with EMPIR events exactly.
@@ -87,8 +90,9 @@ def associate_exact(photons, events, first_events, duration_s=1e-6, units_per_px
     Args:
         photons (DataFrame): photon export (columns x, y, t; npx optional).
         events (DataFrame): event export of the photon-mean reconstruction (x, y, t, n).
-        first_events (DataFrame): event export of the earliest-photon reconstruction of the
-            same photons with the same settings (x, y, t, n).
+        first_events (DataFrame or None): event export of the earliest-photon reconstruction
+            of the same photons with the same settings (x, y, t, n). None: the earliest photon
+            is found on the event's clock tick (see the module description).
         duration_s (float): photon2event durationMax_s.
         units_per_px (int): position units of the comparison (100 = 0.01 px, CSV exports).
         max_pool, max_steps: limits for burst events; beyond them the n - 1 window photons
@@ -100,8 +104,8 @@ def associate_exact(photons, events, first_events, duration_s=1e-6, units_per_px
         status (ndarray): per event, see ``STATUS``.
     """
     ev_t = _ticks(events["t"])
-    if not (np.array_equal(ev_t, _ticks(first_events["t"])) and
-            np.array_equal(np.asarray(events["n"], int), np.asarray(first_events["n"], int))):
+    if first_events is not None and not (np.array_equal(ev_t, _ticks(first_events["t"])) and
+                                         np.array_equal(np.asarray(events["n"], int), np.asarray(first_events["n"], int))):
         raise ValueError("photon-mean and earliest-photon event lists differ")
     order = np.argsort(_ticks(photons["t"]), kind="stable")
     pt = _ticks(photons["t"])[order]
@@ -109,8 +113,10 @@ def associate_exact(photons, events, first_events, duration_s=1e-6, units_per_px
     py = _units(photons["y"], units_per_px)[order]
     ex = _units(events["x"], units_per_px)
     ey = _units(events["y"], units_per_px)
-    fx = _units(first_events["x"], units_per_px)
-    fy = _units(first_events["y"], units_per_px)
+    by_time = first_events is None
+    if not by_time:
+        fx = _units(first_events["x"], units_per_px)
+        fy = _units(first_events["y"], units_per_px)
     en = np.asarray(events["n"], dtype=np.int64)
     dur = int(round(duration_s / TICK_S))
     lo_all = np.searchsorted(pt, ev_t, "left")
@@ -120,6 +126,16 @@ def associate_exact(photons, events, first_events, duration_s=1e-6, units_per_px
     ev_idx, ph_idx, rank = [], [], []
     for i in range(n_ev):
         lo, hi = lo_all[i], hi_all[i]
+        if by_time:
+            res_t = _by_time(i, lo, hi, pt, px, py, ev_t, ex, ey, en, max_pool, max_steps)
+            if res_t is None:
+                status[i] = 1
+                continue
+            chosen, status[i] = res_t
+            ev_idx += [i] * len(chosen)
+            ph_idx += list(order[chosen])
+            rank += list(range(len(chosen)))
+            continue
         f = -1
         j = lo
         while j < hi and pt[j] == ev_t[i]:
@@ -152,6 +168,39 @@ def associate_exact(photons, events, first_events, duration_s=1e-6, units_per_px
     return members, status
 
 
+def _by_time(i, lo, hi, pt, px, py, ev_t, ex, ey, en, max_pool, max_steps):
+    """Membership of event i with the earliest photon taken from the event's clock tick.
+    Returns (chosen photon positions in time order, status) or None if no photon is on the tick."""
+    cands = []
+    j = lo
+    while j < hi and pt[j] == ev_t[i]:
+        cands.append(j)
+        j += 1
+    if not cands:
+        return None
+    n = en[i]
+    if n == 1:
+        for f in cands:
+            if abs(px[f] - ex[i]) <= 1 and abs(py[f] - ey[i]) <= 1:
+                return [f], 0
+        return [cands[0]], 2
+    last = 2
+    for f in cands:
+        pool = [k for k in range(lo, hi) if k != f]
+        if len(pool) > max_pool:
+            last = 4
+            continue
+        res, sub = _search(np.asarray(pool, np.int64), px, py, n - 1,
+                           ex[i] * n - px[f], ey[i] * n - py[f], n + 1, max_steps)
+        if res == 1:
+            return [f] + sub, 0
+        last = 3 if res == -1 else 2
+    f = cands[0]
+    pool = [k for k in range(lo, hi) if k != f]
+    d = (px[pool] - ex[i]) ** 2 + (py[pool] - ey[i]) ** 2
+    return [f] + [pool[k] for k in np.argsort(d, kind="stable")[:n - 1]], last
+
+
 def event_positions(photons, events, first_events, members):
     """Photon-mean, earliest-photon and largest-cluster positions per event.
 
@@ -161,9 +210,14 @@ def event_positions(photons, events, first_events, members):
         raise ValueError("photon export without pixel count (EMPIR >= 1.0.1 needed)")
     m = members.join(photons[["x", "y", "npx"]].reset_index(drop=True), on="photon")
     big = m.sort_values(["event", "npx", "rank"], ascending=[True, False, True]).groupby("event").first()
-    out = pd.DataFrame({"ev/x_cog": np.asarray(events["x"], float), "ev/y_cog": np.asarray(events["y"], float),
-                        "ev/x_first": np.asarray(first_events["x"], float),
-                        "ev/y_first": np.asarray(first_events["y"], float)})
+    out = pd.DataFrame({"ev/x_cog": np.asarray(events["x"], float), "ev/y_cog": np.asarray(events["y"], float)})
+    if first_events is not None:
+        out["ev/x_first"] = np.asarray(first_events["x"], float)
+        out["ev/y_first"] = np.asarray(first_events["y"], float)
+    else:                                       # the earliest member (rank 0)
+        first = m[m["rank"] == 0].set_index("event")
+        out["ev/x_first"] = first["x"].reindex(out.index)
+        out["ev/y_first"] = first["y"].reindex(out.index)
     out["ev/x_largest"] = big["x"].reindex(out.index)
     out["ev/y_largest"] = big["y"].reindex(out.index)
     out["ev/npx_largest"] = big["npx"].reindex(out.index)

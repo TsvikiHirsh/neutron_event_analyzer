@@ -741,21 +741,27 @@ class Analyse:
             return self.associated_df
 
     def associate_exact(self, first_events="ExportedEventsFirst", duration_s=None, verbosity=None,
-                        save=True):
+                        save=True, pixels=False, pixel_max_dist_px=6.0):
         """
         Exact photon-event association of an EMPIR reconstruction (see ``exact``).
 
         Needs the photon and event exports of the photon-mean reconstruction (``load(pixels=False)``)
         and the event export of an earliest-photon reconstruction of the same photons
         (``noBranchChain_ghostPhoton_firstPhotonPos_direct``), given as a folder name under
-        data_folder, a path, or a DataFrame. Every event is reproduced from its photons; the
-        result has one row per (event, photon) with the photon-mean, earliest-photon and
-        largest-cluster positions of the event.
+        data_folder, a path, or a DataFrame. With ``first_events=None`` the earliest photon is
+        found on the event's clock tick instead (no second reconstruction needed, same
+        membership). Every event is reproduced from its photons; the result has one row per
+        (event, photon) with the photon-mean, earliest-photon and largest-cluster positions of
+        the event. With ``pixels=True`` (pixel export loaded) the result is the pixel table of
+        ``associate()`` (pixel-photon step) with the exact photon-event step: one row per pixel
+        and event, ``ph/id`` as in ``associate()``.
         """
         from .exact import associate_exact, event_positions, STATUS
         if verbosity is None:
             verbosity = self.verbosity
-        if isinstance(first_events, pd.DataFrame):
+        if first_events is None:
+            fev = None
+        elif isinstance(first_events, pd.DataFrame):
             fev = first_events
         else:
             d = first_events if os.path.isabs(str(first_events)) else os.path.join(self.data_folder, first_events)
@@ -766,7 +772,12 @@ class Analyse:
         if duration_s is None:
             duration_s = float(self.settings.get("photon2event", {}).get("durationMax_s", 1e-6) or 1e-6)
         ev = self.events_df.sort_values("t", kind="stable").reset_index(drop=True)
-        fev = fev.sort_values("t", kind="stable").reset_index(drop=True)
+        if fev is not None:
+            fev = fev.sort_values("t", kind="stable").reset_index(drop=True)
+        if pixels:
+            # pixel -> photon from the standard association first: it may reorder the photon table
+            self.associate(method="empir", verbosity=0, pixel_max_dist_px=pixel_max_dist_px)
+            px = self.associated_df
         ph = self.photons_df.reset_index(drop=True)
         members, status = associate_exact(ph, ev, fev, duration_s=duration_s)
         pos = event_positions(ph, ev, fev, members)
@@ -777,7 +788,26 @@ class Analyse:
         evc = ev.rename(columns={"x": "ev/x", "y": "ev/y", "t": "ev/toa", "n": "ev/n", "PSD": "ev/psd",
                                  "tof": "ev/tof"}).join(pos)
         evc["ev/status"] = status
-        self.associated_df = m.rename(columns={"event": "ev/id"}).join(evc, on="ev/id")
+        if pixels:
+            # photon -> event exact, joined to the pixel rows by the photon_id of the pixel step
+            pid = ph["photon_id"].to_numpy() if "photon_id" in ph.columns else np.arange(1, len(ph) + 1)
+            mem = pd.DataFrame({"ph/id": pid[members["photon"].to_numpy()].astype(float),
+                                "ev/id": members["event"].to_numpy()})
+            # the pixel step stores the right cluster position but, for about 1% of the pixel rows,
+            # the id of a neighbouring cluster: re-derive the id from (clock tick, x, y) of the cluster
+            from .exact import _ticks, _units
+            key = pd.DataFrame({"k_t": _ticks(ph["t"]), "k_x": _units(ph["x"], 100), "k_y": _units(ph["y"], 100),
+                                "k_id": pid.astype(float)}).drop_duplicates(["k_t", "k_x", "k_y"])
+            has = px["ph/id"].notna().to_numpy()
+            k = pd.DataFrame({"k_t": _ticks(px.loc[has, "ph/toa"]), "k_x": _units(px.loc[has, "ph/x"], 100),
+                              "k_y": _units(px.loc[has, "ph/y"], 100)})
+            fixed = k.merge(key, on=["k_t", "k_x", "k_y"], how="left")["k_id"].to_numpy()
+            px = px.copy()
+            px.loc[has, "ph/id"] = np.where(np.isnan(fixed), px.loc[has, "ph/id"].to_numpy(), fixed)
+            px = px[[c for c in px.columns if not c.startswith("ev/")]].merge(mem, on="ph/id", how="left")
+            self.associated_df = px.join(evc, on="ev/id")
+        else:
+            self.associated_df = m.rename(columns={"event": "ev/id"}).join(evc, on="ev/id")
         self.assoc_method = "exact"
         counts = np.bincount(status, minlength=len(STATUS))
         self.last_photon_event_stats = {"method": "exact", "events": int(len(ev)),
