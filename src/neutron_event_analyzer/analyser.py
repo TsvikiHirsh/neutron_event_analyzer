@@ -788,6 +788,11 @@ class Analyse:
         evc = ev.rename(columns={"x": "ev/x", "y": "ev/y", "t": "ev/toa", "n": "ev/n", "PSD": "ev/psd",
                                  "tof": "ev/tof"}).join(pos)
         evc["ev/status"] = status
+        # photon-level table (one row per event and photon, every cluster of every event); ph/pid is the
+        # photon_id of the pixel table (pixels=True), for joining the two
+        self.exact_photons_df = m.rename(columns={"event": "ev/id"}).join(evc, on="ev/id")
+        if "photon_id" in ph.columns:
+            self.exact_photons_df["ph/pid"] = ph["photon_id"].to_numpy()[members["photon"].to_numpy()].astype(float)
         if pixels:
             # photon -> event exact, joined to the pixel rows by the photon_id of the pixel step
             pid = ph["photon_id"].to_numpy() if "photon_id" in ph.columns else np.arange(1, len(ph) + 1)
@@ -1649,6 +1654,8 @@ class Analyse:
         ph_x_arr  = photons['x'].to_numpy()
         ph_y_arr  = photons['y'].to_numpy()
         ph_id_arr = photons['photon_id'].to_numpy()
+        ph_npx_arr = (photons['npx'].to_numpy() if ('npx' in photons.columns and photons['npx'].notna().all())
+                      else None)                     # EMPIR's own pixel count per photon (EMPIR >= 1.0.1)
 
         r2_max = max_dist_px * max_dist_px
 
@@ -1667,22 +1674,27 @@ class Analyse:
             pop   = bits.sum(axis=1).astype(np.int32)
             return masks, l1, pop
 
-        def _exact_subset(seed_i, cand_idx, ph_x, ph_y):
+        def _exact_subset(seed_i, cand_idx, ph_x, ph_y, want=None):
             """
             Find the largest subset of cand_idx (seed always included) with L1 < COG_TOL.
+            With ``want`` (EMPIR's pixel count of the photon, exports of EMPIR >= 1.0.1)
+            the subset of exactly that size is preferred, so that a bright photon does not
+            take the pixels of a small neighbour whose centroid it can absorb.
             Fast path: try full set first.  Falls back to bitmask argmax-popcount.
             Returns (chosen_cand_indices, l1) or (None, best_l1).
             """
             sx = pix_x[seed_i]; sy = pix_y[seed_i]; st = pix_tot[seed_i]
             nc = min(len(cand_idx), MAX_CAND)
             if nc == 0:
+                if want is not None and want > 1:
+                    return None, abs(sx - ph_x) + abs(sy - ph_y)
                 return None, abs(sx - ph_x) + abs(sy - ph_y)
             cx_arr = pix_x[cand_idx[:nc]]
             cy_arr = pix_y[cand_idx[:nc]]
             ct_arr = pix_tot[cand_idx[:nc]]
-            # Fast path — full set
+            # Fast path — full set (only if its size is EMPIR's pixel count, when known)
             tot_full = st + ct_arr.sum()
-            if tot_full > 0:
+            if tot_full > 0 and (want is None or nc + 1 == want or nc >= MAX_CAND):
                 l1_full = (abs((sx * st + (cx_arr * ct_arr).sum()) / tot_full - ph_x)
                          + abs((sy * st + (cy_arr * ct_arr).sum()) / tot_full - ph_y))
                 if l1_full < COG_TOL:
@@ -1694,6 +1706,11 @@ class Analyse:
             if not match.any():
                 return None, best_l1
             hit  = np.where(match)[0]
+            if want is not None:
+                same = hit[pop[hit] == want - 1]
+                if len(same):
+                    best = same[np.argmin(l1[same])]
+                    return [i for i in range(nc) if int(masks[best]) & (1 << i)], float(l1[best])
             best = hit[pop[hit].argmax()]
             return [i for i in range(nc) if int(masks[best]) & (1 << i)], float(l1[best])
 
@@ -1797,7 +1814,8 @@ class Analyse:
                     cand_idx = cand_idx[np.argsort(pix_t[cand_idx])]
                 last_cand = cand_idx
 
-                combo, l1 = _exact_subset(seed_i, cand_idx, ph_x, ph_y)
+                combo, l1 = _exact_subset(seed_i, cand_idx, ph_x, ph_y,
+                                          None if ph_npx_arr is None else int(ph_npx_arr[ph_j]))
                 if combo is not None:
                     members = np.array([seed_i] + [cand_idx[ci] for ci in combo])
                     claimed[members]       = True

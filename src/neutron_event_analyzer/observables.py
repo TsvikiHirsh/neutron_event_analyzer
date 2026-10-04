@@ -141,6 +141,60 @@ def extract_distributions(df: pd.DataFrame, ev_n_min: Optional[int] = None, ev_n
     return out
 
 
+def select_exact(pixels: pd.DataFrame, photons: pd.DataFrame, ev_n_min: Optional[int] = None,
+                 ev_n_max: Optional[int] = None, energy_window=None, flight_path_m: Optional[float] = None,
+                 L0: float = 1.0, t0_s: float = 0.0):
+    """Events of an exact association (``Analyse.associate_exact(pixels=True)`` and its
+    ``exact_photons_df``) inside the selections, by EMPIR's photon count per event (``ev/n``) and
+    the event energy. Returns (pixel rows, photon rows, event table with ``ev/E`` if a window is set)."""
+    ev = photons.drop_duplicates('ev/id')[['ev/id', 'ev/n', 'ev/tof']].set_index('ev/id')
+    keep = pd.Series(True, index=ev.index)
+    if ev_n_min is not None:
+        keep &= ev['ev/n'] >= ev_n_min
+    if ev_n_max is not None:
+        keep &= ev['ev/n'] <= ev_n_max
+    if energy_window is not None:
+        if flight_path_m is None:
+            raise ValueError('energy_window needs flight_path_m')
+        e = energy_from_tof(ev['ev/tof'].to_numpy(dtype=float), flight_path_m, L0, t0_s)
+        ev = ev.assign(**{'ev/E': e})
+        keep &= (e >= energy_window[0]) & (e < energy_window[1])
+    ids = ev.index[keep.to_numpy()]
+    return pixels[pixels['ev/id'].isin(ids)], photons[photons['ev/id'].isin(ids)], ev.loc[ids]
+
+
+def extract_distributions_exact(pixels: pd.DataFrame, photons: pd.DataFrame, weights=None,
+                                normalize: bool = True) -> dict:
+    """The five distributions from an exact association (see :func:`select_exact`).
+
+    Cluster size (EMPIR's pixel count), clusters per event (EMPIR's count) and the distance of
+    every extra cluster from the largest one come from the photon rows, which hold every cluster
+    of every event; the pixel residual and the pixel arrival time come from the pixel rows.
+    ``weights``: per-event weights (Series indexed by ``ev/id``), else every event counts once.
+    """
+    wmap = (lambda ids: ids.map(weights).to_numpy(dtype=float)) if weights is not None else \
+        (lambda ids: np.ones(len(ids)))
+    out = {}
+    out['ph_n'] = _hist(photons['ph/npx'].to_numpy(), np.r_[PHN_BINS, PHN_BINS[-1] + 1] - 0.5,
+                        wmap(photons['ev/id']), normalize)
+    ev = photons.drop_duplicates('ev/id')
+    out['ev_n'] = _hist(ev['ev/n'].to_numpy(), np.r_[EVN_BINS, EVN_BINS[-1] + 1] - 0.5, wmap(ev['ev/id']), normalize)
+    d = pixels.dropna(subset=['ph/id', 'ev/id'])
+    wd = wmap(d['ev/id'])
+    out['ev_dx'] = _hist((d['px/x'] - d['ev/x']).to_numpy(), DX_BINS, wd, normalize)
+    out['ev_dtoa'] = _hist((d['px/toa'] - d['ev/toa']).to_numpy(), DTOA_BINS, wd, normalize)
+    m = photons[photons['ev/n'] >= 2].sort_values(['ev/id', 'ph/npx', 'ph/toa'], ascending=[True, False, True],
+                                                  kind='stable')
+    sep, wsep = np.array([]), np.array([])
+    if len(m):
+        lead = m.groupby('ev/id')[['ph/x', 'ph/y']].transform('first')
+        rest = (m.groupby('ev/id').cumcount() > 0).to_numpy()
+        sep = np.hypot((m['ph/x'] - lead['ph/x']).to_numpy()[rest], (m['ph/y'] - lead['ph/y']).to_numpy()[rest])
+        wsep = wmap(m['ev/id'])[rest]
+    out['ev_sep'] = _hist(sep, SEP_BINS, wsep, normalize)
+    return out
+
+
 def chi2_sym(p, q, eps: float = 1e-10) -> float:
     """Symmetric chi-squared distance of two histograms."""
     p, q = np.asarray(p, float), np.asarray(q, float)
