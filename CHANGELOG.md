@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.6.1] - 2026-10-05
+
+### Added
+- `Analyse.exact_photons_df` after `associate_exact()`: one row per event and photon, every photon
+  cluster of every event, with `ph/pid`, the photon id of the pixel table (`pixels=True`).
+- `observables.select_exact()` and `observables.extract_distributions_exact()`: the five per-event
+  distributions from an exact association. Cluster size (EMPIR's pixel count), clusters per event
+  (EMPIR's count) and cluster distances come from the photon rows, so clusters that the pixel step
+  leaves without pixels still count; the pixel residual and arrival time come from the pixel rows.
+
+### Changed
+- Pixel-photon step: with EMPIR's pixel count per photon in the exports (EMPIR >= 1.0.1), the pixel
+  subset of exactly that size is preferred, so that a bright photon does not take the pixels of a
+  small neighbour whose centroid it can absorb.
+- `associate_exact(pixels=True)` attaches the event columns in place (memory of large pixel tables).
+
 ## [0.6.0] - 2026-10-04
 
 ### Added
